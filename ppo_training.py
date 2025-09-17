@@ -27,6 +27,12 @@ from environment import IntegratorSwitchingEnv
 import math
 import cantera as ct
 from typing import Optional
+from dotenv import load_dotenv
+load_dotenv()
+
+
+NEPTUNE_PROJECT = os.getenv("NEPTUNE_PROJECT")
+NEPTUNE_API_TOKEN = os.getenv("NEPTUNE_API_TOKEN")
 
 # Optional Neptune import (only needed when logging is enabled)
 try:
@@ -1363,10 +1369,8 @@ if __name__ == "__main__":
     # Neptune logging
     parser.add_argument('--neptune', action='store_true',
                        help='Enable Neptune logging')
-    parser.add_argument('--neptune-project', type=str, default=None,
+    parser.add_argument('--neptune-project', type=str, default=NEPTUNE_PROJECT,
                        help='Neptune project name, e.g. user/workspace')
-    parser.add_argument('--neptune-api-token', type=str, default=None,
-                       help='Neptune API token (or set NEPTUNE_API_TOKEN env var)')
     parser.add_argument('--neptune-tags', nargs='*', default=None,
                        help='Optional list of tags for the Neptune run')
     parser.add_argument('--neptune-name', type=str, default=None,
@@ -1455,14 +1459,18 @@ if __name__ == "__main__":
             print("Error: Neptune is not installed but --neptune flag was provided. Install with: pip install neptune")
             exit(1)
         project = args.neptune_project or os.environ.get('NEPTUNE_PROJECT')
-        api_token = args.neptune_api_token or os.environ.get('NEPTUNE_API_TOKEN', 'anonymous')
+        api_token = NEPTUNE_API_TOKEN or os.environ.get('NEPTUNE_API_TOKEN', 'anonymous')
         if project is None:
             print("Error: --neptune-project not provided and NEPTUNE_PROJECT env var is not set.")
             exit(1)
         try:
             neptune_run = neptune_init_run(project=project, api_token=api_token, name=args.neptune_name, tags=args.neptune_tags)
-            neptune_run["sys/timestamp"].append(time.time())
             neptune_run["config/device"] = device
+            neptune_run["config/timestamp"] = time.time()
+            # add the python files in the current directory to the neptune run
+            for file in os.listdir(os.path.dirname(__file__)):
+                if file.endswith('.py'):
+                    neptune_run[f"config/python_files/{file}"].append(file)
         except Exception as e:
             print(f"Error initializing Neptune run: {e}")
             exit(1)

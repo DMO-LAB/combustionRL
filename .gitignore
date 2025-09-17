@@ -21,6 +21,9 @@ wheels/
 *.egg
 MANIFEST
 
+
+.neptune/
+
 # PyInstaller
 *.manifest
 *.spec

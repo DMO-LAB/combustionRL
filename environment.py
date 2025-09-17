@@ -3,7 +3,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import cantera as ct
 import time
-from qss_utils import create_solver
+from utils import create_solver
 from collections import deque
 from reward_model import LagrangeReward1
 
