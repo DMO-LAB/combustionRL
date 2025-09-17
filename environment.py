@@ -523,7 +523,7 @@ if __name__ == "__main__":
     reward_function = LagrangeReward1(**reward_config)
     # training_initial_conditions = np.load("training_initial_states.npy")
     # print(training_initial_conditions.shape)
-    mechanism_file = "/Users/elotech/Downloads/research_code/pysundial/large_mechanism/n-dodecane.yaml"
+    mechanism_file = "large_mechanism/n-dodecane.yaml"
     fuel = 'nc12h26'
     oxidizer = 'O2:0.21, N2:0.79'
     temp_range = (300, 1400)
@@ -537,7 +537,7 @@ if __name__ == "__main__":
                                  oxidizer=oxidizer,reward_function=reward_function, 
                                  temp_range=temp_range, pressure_range=pressure_range, 
                                  time_range=time_range, dt_range=dt_range, etol=etol, 
-                                 super_steps=super_steps, verbose=False)
+                                 super_steps=super_steps, verbose=True)
 
     solver_configs = [
             # CVODE BDF with different tolerances

@@ -208,7 +208,7 @@ def create_cvode_solver(method: str, config: Dict[str, Any], gas: ct.Solution, y
             abs_tol = np.ones(system_size) * abs_tol[0]
         
     if method == 'cvode':
-        print(f"Creating cvode_bdf solver")
+        #print(f"Creating cvode_bdf solver")
         solver = SP.cvode.CVodeSolver(
             system_size=system_size,
             rhs_fn=lambda t, y: combustion_rhs(t, y, gas, pressure),

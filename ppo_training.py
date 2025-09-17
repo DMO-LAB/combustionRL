@@ -1495,9 +1495,9 @@ if __name__ == "__main__":
     
     # Solver configurations (matching your environment setup)
     solver_configs = [
-        {'type': 'cvode', 'rtol': 1e-6, 'atol': 1e-12, 'mxsteps': 10000, 'name': 'CVODE_BDF'},
+        {'type': 'cvode', 'rtol': 1e-6, 'atol': 1e-12, 'mxsteps': 100000, 'name': 'CVODE_BDF'},
         {'type': 'qss', 'dtmin': 1e-16, 'dtmax': 1e-6, 'stabilityCheck': False, 
-         'itermax': 2, 'epsmin': 0.02, 'epsmax': 10.0, 'abstol': 1e-11, 'mxsteps': 100000, 'name': 'QSS'},
+         'itermax': 2, 'epsmin': 0.02, 'epsmax': 10.0, 'abstol': 1e-8, 'mxsteps': 100000, 'name': 'QSS'},
     ]
     
     # Create environment
