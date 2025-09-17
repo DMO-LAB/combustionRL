@@ -1540,6 +1540,11 @@ if __name__ == "__main__":
         'policy_network_arch': args.policy_network_arch
     }
     
+    # log the ppo hyperparameters
+    neptune_run["config/ppo_kwargs"] = ppo_kwargs
+    neptune_run["reward_config"] = reward_config
+    neptune_run["solver_configs"] = solver_configs
+    
     # Test environment
     print("\nTesting environment...")
     obs, info = env.reset()
