@@ -1425,7 +1425,7 @@ if __name__ == "__main__":
                        help='Timestep range')
     parser.add_argument('--etol', type=float, default=1e-3,
                        help='Error tolerance')
-    parser.add_argument('--super-steps', type=int, default=100,
+    parser.add_argument('--super-steps', type=int, default=50,
                        help='Number of super steps per episode')
     
     # Reward function parameters
