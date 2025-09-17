@@ -115,7 +115,8 @@ class PPOAgent:
     
     def __init__(self, obs_dim, action_dim, lr=3e-3, gamma=0.99, gae_lambda=0.95,
                  clip_coef=0.2, ent_coef=0.3, vf_coef=0.5, max_grad_norm=0.5,
-                 device='cuda' if torch.cuda.is_available() else 'cpu'):
+                 device='cuda' if torch.cuda.is_available() else 'cpu',
+                 policy_network_arch=[256, 128, 64]):
         
         self.device = device
         self.gamma = gamma
@@ -133,7 +134,7 @@ class PPOAgent:
         self.action_counts = {0: 0, 1: 0}
         
         # Initialize network
-        self.network = PPONetwork(obs_dim, action_dim).to(device)
+        self.network = PPONetwork(obs_dim, action_dim, hidden_dims=policy_network_arch).to(device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=lr, eps=1e-5)
         
         print(f"PPO Agent initialized on {device}")
@@ -1366,6 +1367,7 @@ if __name__ == "__main__":
     parser.add_argument('--plot-freq', type=int, default=500,
                        help='Plot generation frequency')
     
+    
     # Neptune logging
     parser.add_argument('--neptune', action='store_true',
                        help='Enable Neptune logging')
@@ -1405,6 +1407,10 @@ if __name__ == "__main__":
                        help='Value function coefficient')
     parser.add_argument('--max-grad-norm', type=float, default=0.5,
                        help='Maximum gradient norm')
+    
+    # parse the policy network architecture
+    parser.add_argument('--policy-network-arch', type=str, default='[64, 32, 16]',
+                       help='Policy network architecture')
     
     # Environment configuration
     parser.add_argument('--temp-range', nargs=2, type=float, default=[300, 1100],
@@ -1464,13 +1470,10 @@ if __name__ == "__main__":
             print("Error: --neptune-project not provided and NEPTUNE_PROJECT env var is not set.")
             exit(1)
         try:
-            neptune_run = neptune_init_run(project=project, api_token=api_token, name=args.neptune_name, tags=args.neptune_tags)
+            neptune_run = neptune_init_run(project=project, api_token=api_token, name=args.neptune_name, tags=args.neptune_tags,
+                                           source_files=["**/*.py", "README.md"])
             neptune_run["config/device"] = device
             neptune_run["config/timestamp"] = time.time()
-            # add the python files in the current directory to the neptune run
-            for file in os.listdir(os.path.dirname(__file__)):
-                if file.endswith('.py'):
-                    neptune_run[f"config/python_files/{file}"].append(file)
         except Exception as e:
             print(f"Error initializing Neptune run: {e}")
             exit(1)
@@ -1533,7 +1536,8 @@ if __name__ == "__main__":
         'ent_coef': args.ent_coef,
         'vf_coef': args.vf_coef,
         'max_grad_norm': args.max_grad_norm,
-        'device': device
+        'device': device,
+        'policy_network_arch': args.policy_network_arch
     }
     
     # Test environment
