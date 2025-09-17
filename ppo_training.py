@@ -29,6 +29,7 @@ import cantera as ct
 from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
+import ast
 
 
 NEPTUNE_PROJECT = os.getenv("NEPTUNE_PROJECT")
@@ -1457,6 +1458,26 @@ if __name__ == "__main__":
         device = args.device
     
     print(f"Using device: {device}")
+
+    # Parse policy network architecture into a list of ints
+    try:
+        arch_arg = args.policy_network_arch
+        parsed_arch = None
+        if isinstance(arch_arg, str):
+            try:
+                parsed_arch = json.loads(arch_arg)
+            except json.JSONDecodeError:
+                parsed_arch = ast.literal_eval(arch_arg)
+        elif isinstance(arch_arg, (list, tuple)):
+            parsed_arch = list(arch_arg)
+
+        if not isinstance(parsed_arch, (list, tuple)):
+            raise ValueError("policy-network-arch must be a list or tuple of integers")
+
+        args.policy_network_arch = [int(x) for x in parsed_arch]
+    except Exception as e:
+        print(f"Warning: Failed to parse --policy-network-arch ('{args.policy_network_arch}'): {e}. Using default [64, 32, 16].")
+        args.policy_network_arch = [64, 32, 16]
     
     # Initialize Neptune if requested
     neptune_run = None
@@ -1541,9 +1562,14 @@ if __name__ == "__main__":
     }
     
     # log the ppo hyperparameters
-    neptune_run["config/ppo_kwargs"] = ppo_kwargs
-    neptune_run["reward_config"] = reward_config
-    neptune_run["solver_configs"] = solver_configs
+    try:
+        if neptune_run is not None:
+            neptune_run["config/ppo_kwargs_json"] = json.dumps(ppo_kwargs)
+            neptune_run["reward_config_json"] = json.dumps(reward_config)
+            neptune_run["solver_configs_json"] = json.dumps(solver_configs)
+    except Exception as _:
+        # Best-effort logging; ignore Neptune type issues
+        pass
     
     # Test environment
     print("\nTesting environment...")
