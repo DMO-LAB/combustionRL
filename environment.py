@@ -22,7 +22,8 @@ class IntegratorSwitchingEnv(gym.Env):
                  steady_time_factor=0.2,
                  verbose=False,
                  solver_configs=None,
-                 terminated_by_steady_state=False):       # Time factor for steady state check
+                 terminated_by_steady_state=False,
+                 termination_count_threshold=50):       # Time factor for steady state check
         
         super().__init__()
 
@@ -45,6 +46,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.steady_temp_tolerance = steady_temp_tolerance
         self.steady_time_factor = steady_time_factor
         self.terminated_by_steady_state = terminated_by_steady_state
+        self.termination_count_threshold = termination_count_threshold
         # Setup gas object
         self.gas = ct.Solution(mechanism_file)
         
@@ -65,7 +67,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.action_space = spaces.Discrete(len(self.solver_configs))
         
         self.key_species = ['O','H','OH','H2O','O2','H2','H2O2','N2']  # fix typo & duplicates
-        obs_size = 2 + len(self.key_species) 
+        obs_size = 2 + len(self.key_species) + 1 # temperature + species + pressure + phi
         self.observation_space = spaces.Box(low=-25., high=10., shape=(obs_size,), dtype=np.float32)
 
         self.representative_species = ['ch4', 'o2', 'h2o', 'co2'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2']
@@ -152,12 +154,17 @@ class IntegratorSwitchingEnv(gym.Env):
         self.initial_state = np.hstack([self.current_temp, self.gas.Y])
         self.current_state = self.initial_state.copy()
         
-        # Calculate episode parameters
         self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
-        
         # Create reference trajectory
         self._compute_reference_trajectory()
         
+        # if max temperature is less than 1000K, adjust timestep to 1e-4
+        if np.max(self.ref_states[:, 0]) < 1000:
+            self.dt = 1e-4
+            if self.verbose:
+                print(f"Adjusted timestep to 1e-4 because max temperature is less than 1000K")
+        
+        self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
         # Create solver instances
         self._create_solver_instances()
     
@@ -211,9 +218,10 @@ class IntegratorSwitchingEnv(gym.Env):
         temp_norm = (temp - 300) / 1700.0  # Normalize temperature
         species_norm = np.power(np.maximum(key_species_values, 1e-20), 0.2)  # Log transform
         pressure_norm =   np.log10(self.current_pressure / ct.one_atm)
-        
+        phi = self.gas.equivalence_ratio(self.fuel, self.oxidizer)
+        phi_norm = np.log10(np.maximum(phi, 1e-10))
   
-        obs = np.hstack([temp_norm, species_norm, pressure_norm]).astype(np.float32)
+        obs = np.hstack([temp_norm, species_norm, pressure_norm, phi_norm]).astype(np.float32)
         return obs
     
     def reset(self, seed=None, options=None, use_initial_state=False, **kwargs):
@@ -245,6 +253,8 @@ class IntegratorSwitchingEnv(gym.Env):
         self.previous_temperature = self.current_state[0]
         self.reached_steady_state = False
         self.count_since_steady_state = 0
+        
+        self.gibbs_free_energy = [self.gas.gibbs_mass]
         
         # Reset reward function for new episode
         self.reward_function.reset_episode()
@@ -287,14 +297,15 @@ class IntegratorSwitchingEnv(gym.Env):
         
         self._check_steady_state(self.current_state[0])
         # # Check for steady state after integration
-        if self.terminated_by_steady_state or self.count_since_steady_state >= 10:
-            print(f"Terminated by steady state or count since steady state >= 10: {self.count_since_steady_state}")
+        if self.terminated_by_steady_state or self.count_since_steady_state >= self.termination_count_threshold:
+            print(f"Terminated by steady state or count since steady state >= {self.count_since_steady_state}")
             terminated = self.reached_steady_state or self.current_episode >= self.n_episodes
         else:
             terminated = self.current_episode >= self.n_episodes
         if terminated:
             if hasattr(self.reward_function, 'end_episode_update_lambda'):
                 self.reward_function.end_episode_update_lambda()
+     
         
         obs = self._get_observation(self.current_state)
         info = self._get_info()
@@ -307,7 +318,8 @@ class IntegratorSwitchingEnv(gym.Env):
             'reached_steady_state': self.reached_steady_state,
             'ignition_detected': self.ignition_detected,
             'ignition_time': self.ignition_time,
-            'termination_reason': 'steady_state' if self.reached_steady_state else ('max_episodes' if terminated else 'ongoing')
+            'termination_reason': 'steady_state' if self.reached_steady_state else ('max_episodes' if terminated else 'ongoing'),
+            'gibbs_free_energy': self.gibbs_free_energy[-1]
         })
         
         return obs, reward, terminated, False, info
@@ -375,6 +387,7 @@ class IntegratorSwitchingEnv(gym.Env):
                 
                 # Update gas object with new state for next iteration
                 self.gas.TPY = self.current_state[0], self.current_pressure, self.current_state[1:]
+                self.gibbs_free_energy.append(self.gas.gibbs_mass)
                 self.states_trajectory.append(self.current_state.copy())
                 self.current_time += self.dt
                 self.times_trajectory.append(self.current_time)
@@ -456,8 +469,10 @@ class IntegratorSwitchingEnv(gym.Env):
                 'ignition_time': self.ignition_time,
                 'reached_steady_state': self.reached_steady_state,
                 'current_time': self.current_time,
+            },
+            'gibbs_free_energy': self.gibbs_free_energy[-1],
+            'gibbs_free_energy_history': self.gibbs_free_energy
             }
-        }
     
     def get_solver_names(self):
         """Get list of solver names for reference"""
@@ -537,7 +552,7 @@ if __name__ == "__main__":
                                  oxidizer=oxidizer,reward_function=reward_function, 
                                  temp_range=temp_range, pressure_range=pressure_range, 
                                  time_range=time_range, dt_range=dt_range, etol=etol, 
-                                 super_steps=super_steps, verbose=True)
+                                 super_steps=super_steps, verbose=True, termination_count_threshold=100)
 
     solver_configs = [
             # CVODE BDF with different tolerances
