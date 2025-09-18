@@ -6,6 +6,7 @@ import time
 from utils import create_solver
 from collections import deque
 from reward_model import LagrangeReward1
+from collections import deque
 
 class IntegratorSwitchingEnv(gym.Env):
     """RL Environment for combustion integrator switching with steady state detection"""
@@ -16,6 +17,7 @@ class IntegratorSwitchingEnv(gym.Env):
                  pressure_range=(1, 60), time_range=(1e-3, 1e-2),
                  dt_range=(1e-6, 1e-4),
                  dt=1e-6, etol=1e-3, super_steps=50,
+                 fixed_n_episodes=100,
                  reward_function=None,
                  ignition_temp_threshold=1600,  # Temperature threshold for ignition detection
                  steady_temp_tolerance=1.0,     # Temperature change tolerance for steady state
@@ -38,9 +40,10 @@ class IntegratorSwitchingEnv(gym.Env):
         self.time_range = time_range
         self.dt = dt
         self.dt_range = dt_range
-        self.super_steps = super_steps
+        # self.super_steps = super_steps
         self.etol = etol
         self.verbose = verbose
+        self.fixed_n_episodes = fixed_n_episodes
         # Steady state detection parameters
         self.ignition_temp_threshold = ignition_temp_threshold
         self.steady_temp_tolerance = steady_temp_tolerance
@@ -67,13 +70,15 @@ class IntegratorSwitchingEnv(gym.Env):
         self.action_space = spaces.Discrete(len(self.solver_configs))
         
         self.key_species = ['O','H','OH','H2O','O2','H2','H2O2','N2']  # fix typo & duplicates
-        obs_size = 2 + len(self.key_species) + 1 # temperature + species + pressure + phi
+        obs_size = 2 + len(self.key_species) # temperature + species + pressure + phi
         self.observation_space = spaces.Box(low=-25., high=10., shape=(obs_size,), dtype=np.float32)
 
         self.representative_species = ['ch4', 'o2', 'h2o', 'co2'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2']
         self.representative_species_indices = [self.gas.species_index(spec) for spec in self.representative_species]
         # Initialize solver instances (will be created in reset)
         self.solvers = []
+        
+        self.previous_states = deque(maxlen=2)
         
         # Error tracking
         self.timestep_errors = []
@@ -115,7 +120,7 @@ class IntegratorSwitchingEnv(gym.Env):
             self.current_species = state[:-2]
             print(f"Using initial state: {self.current_temp}, {self.current_pressure}")
         else:
-            pressure_range = np.arange(1, 61, 1)
+            pressure_range = np.arange(1, 11, 1)
             
             self.current_temp = kwargs.get('temperature', 
                                         np.random.uniform(*self.temp_range))
@@ -132,6 +137,12 @@ class IntegratorSwitchingEnv(gym.Env):
         
         self.etol = kwargs.get('etol', 
                              self.etol)
+        
+        total_episodes = int(self.total_time / self.dt)
+        self.super_steps = int(total_episodes / self.fixed_n_episodes)
+        self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
+        if self.verbose:
+            print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps}")
         
         if self.verbose:
             print(f"Env Reset with temperature: {self.current_temp},  pressure: {self.current_pressure}, phi: {self.current_phi}, Total time: {self.total_time}, Dt: {self.dt}, Etol: {self.etol}")
@@ -151,6 +162,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.current_phi = self.gas.equivalence_ratio(self.fuel, self.oxidizer)
         
         # Create initial state
+        
         self.initial_state = np.hstack([self.current_temp, self.gas.Y])
         self.current_state = self.initial_state.copy()
         
@@ -158,11 +170,14 @@ class IntegratorSwitchingEnv(gym.Env):
         # Create reference trajectory
         self._compute_reference_trajectory()
         
-        # if max temperature is less than 1000K, adjust timestep to 1e-4
-        if np.max(self.ref_states[:, 0]) < 1000:
-            self.dt = 1e-4
+        # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
+        if np.max(self.ref_states[:, 0]) < 600:
+            self.total_time = self.total_time/10
+            total_episodes = int(self.total_time / self.dt)
+            self.super_steps = int(total_episodes / self.fixed_n_episodes)
+            self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
             if self.verbose:
-                print(f"Adjusted timestep to 1e-4 because max temperature is less than 1000K")
+                print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
         
         self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
         # Create solver instances
@@ -199,6 +214,33 @@ class IntegratorSwitchingEnv(gym.Env):
         if self.verbose:
             print(f"Max reference temperature: {np.max(self.ref_states[:, 0])}")
     
+    def _get_combustion_indicators(self, temp):
+        """Compute physics-based indicators for solver switching"""
+        # Actual temperature gradient (dT/dt)
+        if hasattr(self, 'previous_states') and len(self.previous_states) >= 1:
+            temp_gradient = abs(temp - self.previous_states[-1][0])
+            temp_gradient_norm = temp_gradient / (temp - self.initial_state[0])
+        else:
+            temp_gradient = 0.0
+            temp_gradient_norm = 0.0
+        
+        # Temperature acceleration (d²T/dt²) - better indicator of ignition onset
+        if hasattr(self, 'previous_states') and len(self.previous_states) >= 2:
+            temp_accel = abs(((temp - self.previous_states[-1][0]) - 
+                        (self.previous_states[-1][0] - self.previous_states[-2][0])))
+            temp_accel_norm = temp_accel / (temp - self.initial_state[0])
+        else:
+            temp_accel = 0.0
+            temp_accel_norm = 0.0
+        
+        # Temperature rise ratio (what the original code was actually doing)
+        temp_rise_ratio = (temp - self.current_temp) / max(self.current_temp, 300)
+        ignition_proximity = np.tanh(temp_rise_ratio * 5.0)
+        
+        # print(f"Temp gradient norm: {temp_gradient_norm}, Temp accel norm: {temp_accel_norm}, Ignition proximity: {ignition_proximity}")
+        # print(f"Temp gradient: {temp_gradient}, Temp accel: {temp_accel}, Temp rise ratio: {temp_rise_ratio}")
+        return [temp_gradient_norm, temp_accel_norm, ignition_proximity]
+    
     def _get_observation(self, state):
         """Convert state to observation including error flags"""
         temp = state[0]
@@ -215,13 +257,11 @@ class IntegratorSwitchingEnv(gym.Env):
                 key_species_values.append(0.0)
         
         # Normalize and transform
-        temp_norm = (temp - 300) / 1700.0  # Normalize temperature
-        species_norm = np.power(np.maximum(key_species_values, 1e-20), 0.2)  # Log transform
+        temp_norm = (temp - 300) / 2000.0  # Normalize temperature
+        species_norm = np.log10(np.maximum(key_species_values, 1e-20))  # Log transform
         pressure_norm =   np.log10(self.current_pressure / ct.one_atm)
-        phi = self.gas.equivalence_ratio(self.fuel, self.oxidizer)
-        phi_norm = np.log10(np.maximum(phi, 1e-10))
   
-        obs = np.hstack([temp_norm, species_norm, pressure_norm, phi_norm]).astype(np.float32)
+        obs = np.hstack([temp_norm, species_norm, pressure_norm]).astype(np.float32)
         return obs
     
     def reset(self, seed=None, options=None, use_initial_state=False, **kwargs):
@@ -237,7 +277,8 @@ class IntegratorSwitchingEnv(gym.Env):
         self.action_history = []
         self.cpu_times = []
         self.episode_rewards = []
-        
+    
+        self.previous_states.clear()
         # Reset error tracking
         self.cumulative_error = 0.0
         self.timestep_errors = []
@@ -246,7 +287,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.current_time = 0.0
         self.times_trajectory = [self.current_time]
         self.states_trajectory.append(self.current_state.copy())
-        
+
         # Reset steady state tracking
         self.ignition_detected = False
         self.ignition_time = None
@@ -308,6 +349,7 @@ class IntegratorSwitchingEnv(gym.Env):
      
         
         obs = self._get_observation(self.current_state)
+        self.previous_states.append(self.current_state.copy())
         info = self._get_info()
         info.update({
             'action': action,
@@ -452,7 +494,6 @@ class IntegratorSwitchingEnv(gym.Env):
             'total_episodes': self.n_episodes,
             'current_conditions': {
                 'temperature': self.current_temp,
-                'phi': self.current_phi,
                 'pressure': self.current_pressure / ct.one_atm,
                 'total_time': self.total_time
             },

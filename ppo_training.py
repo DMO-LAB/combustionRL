@@ -755,6 +755,7 @@ class DetailedLogger:
         
         # Create plots for each evaluation parameter set
         for i, result in enumerate(eval_results):
+            print(f"Creating evaluation plots for episode {episode_num} - set {i+1}")
             fig, axes = plt.subplots(2, 2, figsize=(15, 10))
             fig.suptitle(f'Evaluation Episode {episode_num} - Set {i+1}\n'
                         f'T={result["conditions"]["temperature"]:.0f}K, '
@@ -769,8 +770,10 @@ class DetailedLogger:
                 cpu_times = episode_data['cpu_times']
                 rewards = episode_data['rewards']
                 actions = episode_data['actions']
+                species_profile = episode_data['trajectory'][:, 1:]
                 solver_names = episode_data['solver_names']
                 reference_temperatures = episode_data['reference_temperatures']
+                reference_species = episode_data['reference_species'] 
                 reference_times = episode_data['reference_times']
             else:
                 # Fallback: create dummy data if structure is different
@@ -791,14 +794,14 @@ class DetailedLogger:
             # Plot 2: CPU time profile
             ax2 = axes[0, 1]
             # Left axis for CPU time
-            ax2.plot(times, cpu_times, 'g-', linewidth=2, label='CPU Time')
+            ax2.plot(np.arange(len(cpu_times)), cpu_times, 'g-', linewidth=2, label='CPU Time')
             ax2.set_xlabel('Time (s)')
             ax2.set_ylabel('CPU Time (s)', color='g')
             ax2.tick_params(axis='y', labelcolor='g')
             
             # Right axis for reward
             ax2_right = ax2.twinx()
-            ax2_right.plot(times, rewards, 'r-', linewidth=2, label='Reward')
+            ax2_right.plot(np.arange(len(rewards)), rewards, 'r-', linewidth=2, label='Reward')
             ax2_right.set_ylabel('Reward', color='r')
             ax2_right.tick_params(axis='y', labelcolor='r')
             
@@ -815,7 +818,7 @@ class DetailedLogger:
             action_colors = ['red', 'blue', 'green', 'orange', 'purple']
             for j, action in enumerate(actions):
                 color = action_colors[action % len(action_colors)]
-                ax3.scatter(times[j], action, c=color, s=20, alpha=0.7)
+                ax3.scatter(np.arange(len(actions))[j], action, c=color, s=20, alpha=0.7)
             
             ax3.set_xlabel('Time (s)')
             ax3.set_ylabel('Solver Action')
@@ -824,27 +827,24 @@ class DetailedLogger:
             ax3.set_yticklabels(solver_names)
             ax3.grid(True, alpha=0.3)
                         
-            # Plot 4: Solver usage histogram
+            # Plot 4: Solver species profile of CO2, H2O, H2, OH
             ax4 = axes[1, 1]
-            action_counts = np.bincount(actions, minlength=len(solver_names))
-            bars = ax4.bar(range(len(solver_names)), action_counts, 
-                          color=action_colors[:len(solver_names)])
-            ax4.set_xlabel('Solver')
-            ax4.set_ylabel('Usage Count')
-            ax4.set_title('Solver Usage Distribution')
-            ax4.set_xticks(range(len(solver_names)))
-            ax4.set_xticklabels(solver_names, rotation=45)
-            
-            # Add count labels on bars
-            for bar, count in zip(bars, action_counts):
-                if count > 0:
-                    ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                           str(count), ha='center', va='bottom')
-            
+            species_names = ['CO2', 'H2O', 'H2', 'OH']
+            for s in range(len(species_names)):
+                specie_index = env.gas.species_index(species_names[s])
+                ax4.plot(np.arange(len(times)), species_profile[:, specie_index], label=f'{species_names[s]}')
+                ax4.plot(np.arange(len(reference_times)), reference_species[:, specie_index], label=f'{species_names[s]} Reference', linestyle='--')
+            ax4.set_xlabel('Time (s)')
+            ax4.set_ylabel('Species Concentration')
+            ax4.set_title('Species Profile')
+            ax4.grid(True, alpha=0.3)
+            ax4.legend()
+           
             plt.tight_layout()
             
+            print(f"Saving plot for episode {episode_num} - set {i+1}")
             # Save plot
-            filename = f'evaluation_ep{episode_num}_set{i+1}.png'
+            filename = f'evaluation_ep_{episode_num}_set{i+1}.png'
             plt.savefig(os.path.join(self.experiment_dir, 'evaluations', filename), 
                        dpi=150, bbox_inches='tight')
             plt.close()
@@ -859,7 +859,7 @@ class DetailedLogger:
     
     def _create_evaluation_summary_plot(self, episode_num, eval_results):
         """Create summary plot comparing all evaluation sets"""
-        
+        print(f"Creating evaluation summary plot for episode {episode_num}")
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle(f'Evaluation Summary - Episode {episode_num}', fontsize=16)
         
@@ -877,6 +877,7 @@ class DetailedLogger:
                 label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['phi']:.2f}"
                 ax1.plot(times, temperatures, color=colors[i], linewidth=2, label=label)
                 ax1.plot(reference_times, reference_temperatures, color='black', linewidth=2, label='Reference', linestyle='--')
+        
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Temperature (K)')
         ax1.set_title('Temperature Profiles Comparison')
@@ -888,10 +889,9 @@ class DetailedLogger:
         for i, result in enumerate(eval_results):
             if 'episodes' in result and result['episodes']:
                 episode_data = result['episodes'][0]  # Use first episode for detailed plotting
-                times = episode_data['times']
                 cpu_times = episode_data['cpu_times']
                 label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['phi']:.2f}"
-                ax2.plot(times, cpu_times, color=colors[i], linewidth=2, label=label)
+                ax2.plot(np.arange(len(cpu_times)), cpu_times, color=colors[i], linewidth=2, label=label)
         ax2.set_xlabel('Time (s)')
         ax2.set_ylabel('CPU Time (s)')
         ax2.set_title('CPU Time Comparison')
@@ -908,7 +908,7 @@ class DetailedLogger:
             for i, result in enumerate(eval_results):
                 if 'episodes' in result and result['episodes']:
                     episode_data = result['episodes'][0]
-                    action_counts = np.bincount(episode_data['actions'], minlength=len(solver_names))
+                    action_counts = np.bincount(np.array(episode_data['actions']), minlength=len(solver_names))
                     percentages = action_counts / len(episode_data['actions']) * 100
                     ax3.bar(x + i*width, percentages, width, label=f"Set {i+1}", color=colors[i])
         
@@ -989,11 +989,6 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
             
             # Episode data collection
             episode_data = {
-                'times': [],
-                'temperatures': [],
-                'cpu_times': [],
-                'actions': [],
-                'rewards': [],
                 'conditions': conditions.copy(),
                 'solver_names': env.get_solver_names()
             }
@@ -1023,11 +1018,6 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
                 done = terminated or truncated
                 
                 # Collect data
-                episode_data['times'].append(env.current_time)
-                episode_data['temperatures'].append(env.current_state[0])  # Temperature
-                episode_data['cpu_times'].append(next_info.get('cpu_time', 0))
-                episode_data['actions'].append(int(action))
-                episode_data['rewards'].append(reward)
                 
                 total_reward += reward
                 total_cpu_time += next_info.get('cpu_time', 0)
@@ -1048,6 +1038,19 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
             
             pbar.close()
             
+            
+            
+            episode_data['cpu_times'] = env.cpu_times
+            episode_data['actions'] = env.action_history
+            episode_data['rewards'] = env.episode_rewards
+            episode_data['timestep_errors'] = env.timestep_errors
+            episode_data['trajectory'] = np.array(env.states_trajectory)
+            episode_data['temperatures'] = np.array(env.states_trajectory)[:, 0]
+            episode_data['times'] = env.times_trajectory
+            # add reference states
+            episode_data['reference_temperatures'] = env.ref_states[:, 0]
+            episode_data['reference_times'] = env.ref_times
+            episode_data['reference_species'] = env.ref_states[:, 1:]
             # Calculate action distribution
             action_counts = {}
             for a in episode_data['actions']:
@@ -1057,9 +1060,6 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
                 for i, solver in enumerate(episode_data['solver_names'])
             }
             
-            # add reference states
-            episode_data['reference_temperatures'] = env.ref_states[:, 0]
-            episode_data['reference_times'] = env.ref_times
             
             # Episode summary
             episode_summary = {
@@ -1133,7 +1133,7 @@ def compute_gae(rewards, values, dones, next_value, gamma=0.99, gae_lambda=0.95)
 
 def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10, 
               save_freq=100, plot_freq=500, eval_freq=500, eval_conditions=None, 
-              n_eval_episodes=5, neptune_run: Optional[object] = None, **ppo_kwargs):
+              n_eval_episodes=5, neptune_run: Optional[object] = None, const_pressure=None, **ppo_kwargs):
     """Fixed PPO training loop with proper periodic operations"""
     
     # Initialize agent
@@ -1157,7 +1157,10 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
     rollout_buffer = []
     
     # Initialize first episode
-    obs, info = env.reset()
+    if const_pressure is not None:
+        obs, info = env.reset(pressure=const_pressure*ct.one_atm)
+    else:
+        obs, info = env.reset()
     done = False
     episode_data = {'actions': [], 'rewards': []}
     
@@ -1254,7 +1257,10 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
                 
                 # Start new episode if we need more steps
                 if steps_collected < rollout_length:
-                    obs, info = env.reset()
+                    if const_pressure is not None:
+                        obs, info = env.reset(pressure=const_pressure*ct.one_atm)
+                    else:
+                        obs, info = env.reset()
                     done = False
                     episode_data = {'actions': [], 'rewards': []}
             
@@ -1386,7 +1392,7 @@ if __name__ == "__main__":
                        help='Number of evaluation episodes per condition set')
     parser.add_argument('--eval-temp', nargs=3, type=float, default=[650, 700, 1100],
                        help='Evaluation temperatures (K)')
-    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[3.0, 60.0, 1.0],
+    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[3.0, 10.0, 1.0],
                        help='Evaluation pressures (bar)')
     parser.add_argument('--eval-phi', nargs=3, type=float, default=[1, 1.66, 1.0],
                        help='Evaluation equivalence ratios')
@@ -1410,7 +1416,7 @@ if __name__ == "__main__":
                        help='Maximum gradient norm')
     
     # parse the policy network architecture
-    parser.add_argument('--policy-network-arch', type=str, default='[64, 32, 16]',
+    parser.add_argument('--policy-network-arch', type=str, default='[256, 128, 64]',
                        help='Policy network architecture')
     
     # Environment configuration
@@ -1418,19 +1424,19 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
                        help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 1],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 2e-2],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-2, 1e-1],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
-    parser.add_argument('--etol', type=float, default=1e-3,
+    parser.add_argument('--etol', type=float, default=1e-4,
                        help='Error tolerance')
-    parser.add_argument('--super-steps', type=int, default=50,
+    parser.add_argument('--super-steps', type=int, default=100,
                        help='Number of super steps per episode')
     
     # Reward function parameters
-    parser.add_argument('--epsilon', type=float, default=1e-3,
+    parser.add_argument('--epsilon', type=float, default=1e-4,
                        help='Error threshold for reward function')
     parser.add_argument('--lambda-init', type=float, default=1.0,
                        help='Lambda initial value')
@@ -1438,9 +1444,9 @@ if __name__ == "__main__":
                        help='Lambda learning rate')
     parser.add_argument('--target-violation', type=float, default=0.0,
                        help='Target violation')
-    parser.add_argument('--cpu-log-delta', type=float, default=1e-3,
+    parser.add_argument('--cpu-log-delta', type=float, default=1e-2,
                        help='CPU log delta')
-    parser.add_argument('--reward-clip', type=float, default=5.0,
+    parser.add_argument('--reward-clip', type=float, default=10.0,
                        help='Reward clip')
     
     # Hardware
@@ -1477,7 +1483,7 @@ if __name__ == "__main__":
         args.policy_network_arch = [int(x) for x in parsed_arch]
     except Exception as e:
         print(f"Warning: Failed to parse --policy-network-arch ('{args.policy_network_arch}'): {e}. Using default [64, 32, 16].")
-        args.policy_network_arch = [64, 32, 16]
+        args.policy_network_arch = [256, 128, 64]
     
     # Initialize Neptune if requested
     neptune_run = None
@@ -1521,7 +1527,7 @@ if __name__ == "__main__":
     solver_configs = [
         {'type': 'cvode', 'rtol': 1e-6, 'atol': 1e-12, 'mxsteps': 100000, 'name': 'CVODE_BDF'},
         {'type': 'qss', 'dtmin': 1e-16, 'dtmax': 1e-6, 'stabilityCheck': False, 
-         'itermax': 2, 'epsmin': 0.02, 'epsmax': 10.0, 'abstol': 1e-8, 'mxsteps': 100000, 'name': 'QSS'},
+         'itermax': 2, 'epsmin': 0.002, 'epsmax': 100.0, 'abstol': 1e-8, 'mxsteps': 100000, 'name': 'QSS'},
     ]
     
     # Create environment
@@ -1530,11 +1536,11 @@ if __name__ == "__main__":
         mechanism_file=args.mechanism_file,
         fuel=args.fuel,
         oxidizer=args.oxidizer,
-        temp_range=tuple(args.temp_range),
-        phi_range=tuple(args.phi_range),
-        pressure_range=tuple(args.pressure_range),
-        time_range=tuple(args.time_range),
-        dt_range=tuple(args.dt_range),
+        temp_range=(300, 1100),
+        phi_range=(0.5, 2.0),
+        pressure_range=(1, 10),
+        time_range=(1e-3, 1e-1),
+        dt_range=(1e-6, 1e-6),
         etol=args.etol,
         super_steps=args.super_steps,
         reward_function=reward_function,
@@ -1617,6 +1623,7 @@ if __name__ == "__main__":
             eval_conditions=eval_conditions,
             n_eval_episodes=args.n_eval_episodes,
             neptune_run=neptune_run,
+            const_pressure=1,
             **ppo_kwargs
         )
         

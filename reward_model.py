@@ -31,17 +31,19 @@ class LagrangeReward1:
         self._violations.append(violation)
 
         r = cpu_term - self.lambda_ * violation
-        reward = float(np.clip(r, -self.reward_clip, self.reward_clip))
+        
         # if violation is 0 and action is 1 and reached_steady_state is True, add a bonus
         if violation == 0 and action == 1 and reached_steady_state:
-            r_bonus = 10.0
-            print(f"Good action: {action} and reached_steady_state: {reached_steady_state} - reward: {r} - reward_bonus: {r_bonus} - error: {err:4f} - cpu_time: {cpu_time:4f}")
+            r_bonus = r
+            #print(f"Good action: {action} and reached_steady_state: {reached_steady_state} - reward: {r} - reward_bonus: {r_bonus} - error: {err:4f} - cpu_time: {cpu_time:4f}")
         elif violation == 0 and reached_steady_state and action == 0:
-            r_bonus = -5.0
+            r_bonus = -r
         else:
             r_bonus = 0.0
-        #print(f"Error: {err:4f} - CPU time: {cpu_time:4f} - Reward: {reward} - Reward bonus: {r_bonus}")
-        return reward + r_bonus
+            
+        r += r_bonus
+        reward = float(np.clip(r, -2, self.reward_clip))
+        return reward
 
     def end_episode_update_lambda(self):
         if not self._violations:
