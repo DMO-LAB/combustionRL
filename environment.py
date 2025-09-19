@@ -25,7 +25,9 @@ class IntegratorSwitchingEnv(gym.Env):
                  verbose=False,
                  solver_configs=None,
                  terminated_by_steady_state=False,
-                 termination_count_threshold=50):       # Time factor for steady state check
+                 termination_count_threshold=50,
+                 precompute_reference=False,
+                 track_trajectory=False):       # Time factor for steady state check
         
         super().__init__()
 
@@ -50,6 +52,8 @@ class IntegratorSwitchingEnv(gym.Env):
         self.steady_time_factor = steady_time_factor
         self.terminated_by_steady_state = terminated_by_steady_state
         self.termination_count_threshold = termination_count_threshold
+        self.precompute_reference = precompute_reference
+        self.track_trajectory = track_trajectory
         # Setup gas object
         self.gas = ct.Solution(mechanism_file)
         
@@ -70,11 +74,11 @@ class IntegratorSwitchingEnv(gym.Env):
         self.action_space = spaces.Discrete(len(self.solver_configs))
         
         self.key_species = ['O','H','OH','H2O','O2','H2','H2O2','N2']  # fix typo & duplicates
-        obs_size = 2 + len(self.key_species) # temperature + species + pressure + phi
-        self.observation_space = spaces.Box(low=-25., high=10., shape=(obs_size,), dtype=np.float32)
+        obs_size = 2 + len(self.key_species)  # base (T + species + pressure)
+        self.observation_space = spaces.Box(low=-50., high=50., shape=(2*obs_size,), dtype=np.float32)
 
         self.representative_species = ['ch4', 'o2', 'h2o', 'co2'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2']
-        self.representative_species_indices = [self.gas.species_index(spec) for spec in self.representative_species]
+        self.representative_species_indices = [self._safe_species_index(spec) for spec in self.representative_species]
         # Initialize solver instances (will be created in reset)
         self.solvers = []
         
@@ -88,6 +92,18 @@ class IntegratorSwitchingEnv(gym.Env):
         self.ignition_time = None
         self.previous_temperature = None
         self.reached_steady_state = False
+        
+    def _safe_species_index(self, name: str):
+        """Return species index if present, trying a few common casings. Else None."""
+        try:
+            return self.gas.species_index(name)
+        except ValueError:
+            for alt in (name.upper(), name.capitalize(), name.lower()):
+                try:
+                    return self.gas.species_index(alt)
+                except ValueError:
+                    pass
+        return None
 
     def _create_solver_instances(self):
         """Create all solver instances for current conditions"""
@@ -139,7 +155,8 @@ class IntegratorSwitchingEnv(gym.Env):
                              self.etol)
         
         total_episodes = int(self.total_time / self.dt)
-        self.super_steps = int(total_episodes / self.fixed_n_episodes)
+        self.super_steps = max(1, int(total_episodes / self.fixed_n_episodes))
+
         self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
         if self.verbose:
             print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps}")
@@ -168,16 +185,18 @@ class IntegratorSwitchingEnv(gym.Env):
         
         self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
         # Create reference trajectory
-        self._compute_reference_trajectory()
+        if self.precompute_reference:
+            self._compute_reference_trajectory()
         
         # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
-        if np.max(self.ref_states[:, 0]) < 600:
-            self.total_time = self.total_time/10
-            total_episodes = int(self.total_time / self.dt)
-            self.super_steps = int(total_episodes / self.fixed_n_episodes)
-            self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
-            if self.verbose:
-                print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
+        if self.precompute_reference:
+            if np.max(self.ref_states[:, 0]) < 600:
+                self.total_time = self.total_time/10
+                total_episodes = int(self.total_time / self.dt)
+                self.super_steps = max(1, int(total_episodes / self.fixed_n_episodes))
+                self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
+                if self.verbose:
+                    print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
         
         self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
         # Create solver instances
@@ -214,54 +233,35 @@ class IntegratorSwitchingEnv(gym.Env):
         if self.verbose:
             print(f"Max reference temperature: {np.max(self.ref_states[:, 0])}")
     
-    def _get_combustion_indicators(self, temp):
-        """Compute physics-based indicators for solver switching"""
-        # Actual temperature gradient (dT/dt)
-        if hasattr(self, 'previous_states') and len(self.previous_states) >= 1:
-            temp_gradient = abs(temp - self.previous_states[-1][0])
-            temp_gradient_norm = temp_gradient / (temp - self.initial_state[0])
-        else:
-            temp_gradient = 0.0
-            temp_gradient_norm = 0.0
-        
-        # Temperature acceleration (d²T/dt²) - better indicator of ignition onset
-        if hasattr(self, 'previous_states') and len(self.previous_states) >= 2:
-            temp_accel = abs(((temp - self.previous_states[-1][0]) - 
-                        (self.previous_states[-1][0] - self.previous_states[-2][0])))
-            temp_accel_norm = temp_accel / (temp - self.initial_state[0])
-        else:
-            temp_accel = 0.0
-            temp_accel_norm = 0.0
-        
-        # Temperature rise ratio (what the original code was actually doing)
-        temp_rise_ratio = (temp - self.current_temp) / max(self.current_temp, 300)
-        ignition_proximity = np.tanh(temp_rise_ratio * 5.0)
-        
-        # print(f"Temp gradient norm: {temp_gradient_norm}, Temp accel norm: {temp_accel_norm}, Ignition proximity: {ignition_proximity}")
-        # print(f"Temp gradient: {temp_gradient}, Temp accel: {temp_accel}, Temp rise ratio: {temp_rise_ratio}")
-        return [temp_gradient_norm, temp_accel_norm, ignition_proximity]
-    
     def _get_observation(self, state):
-        """Convert state to observation including error flags"""
+        """Convert state to observation with trend features."""
         temp = state[0]
         species = state[1:]
-        
-        # Get key species indices
-        key_species_values = []
+
+        # Key species (log10 mole fractions)
+        key_vals = []
         for spec in self.key_species:
             try:
                 idx = self.gas.species_index(spec)
-                key_species_values.append(species[idx])
+                key_vals.append(species[idx])
             except ValueError:
-                # Species not found in mechanism
-                key_species_values.append(0.0)
-        
-        # Normalize and transform
-        temp_norm = (temp - 300) / 2000.0  # Normalize temperature
-        species_norm = np.log10(np.maximum(key_species_values, 1e-20))  # Log transform
-        pressure_norm =   np.log10(self.current_pressure / ct.one_atm)
-  
-        obs = np.hstack([temp_norm, species_norm, pressure_norm]).astype(np.float32)
+                key_vals.append(0.0)
+
+        temp_norm = (temp - 300.0) / 2000.0
+        species_log = np.log10(np.maximum(key_vals, 1e-20))
+        pressure_log = np.log10(self.current_pressure / ct.one_atm)
+
+        # base obs: [T_norm, logY(key species...), logP]
+        base_obs = np.hstack([temp_norm, species_log, pressure_log]).astype(np.float32)
+
+        # --- trend features (delta over last obs) ---
+        if self.last_obs is None:
+            trend = np.zeros_like(base_obs, dtype=np.float32)
+        else:
+            trend = base_obs - self.last_obs
+
+        obs = np.hstack([base_obs, trend]).astype(np.float32)
+        self.last_obs = base_obs.copy()
         return obs
     
     def reset(self, seed=None, options=None, use_initial_state=False, **kwargs):
@@ -294,9 +294,8 @@ class IntegratorSwitchingEnv(gym.Env):
         self.previous_temperature = self.current_state[0]
         self.reached_steady_state = False
         self.count_since_steady_state = 0
-        
-        self.gibbs_free_energy = [self.gas.gibbs_mass]
-        
+
+        self.last_obs = None        
         # Reset reward function for new episode
         self.reward_function.reset_episode()
         
@@ -361,7 +360,6 @@ class IntegratorSwitchingEnv(gym.Env):
             'ignition_detected': self.ignition_detected,
             'ignition_time': self.ignition_time,
             'termination_reason': 'steady_state' if self.reached_steady_state else ('max_episodes' if terminated else 'ongoing'),
-            'gibbs_free_energy': self.gibbs_free_energy[-1]
         })
         
         return obs, reward, terminated, False, info
@@ -429,10 +427,11 @@ class IntegratorSwitchingEnv(gym.Env):
                 
                 # Update gas object with new state for next iteration
                 self.gas.TPY = self.current_state[0], self.current_pressure, self.current_state[1:]
-                self.gibbs_free_energy.append(self.gas.gibbs_mass)
-                self.states_trajectory.append(self.current_state.copy())
+                if self.track_trajectory:
+                    self.states_trajectory.append(self.current_state.copy())
                 self.current_time += self.dt
-                self.times_trajectory.append(self.current_time)
+                if self.track_trajectory:
+                    self.times_trajectory.append(self.current_time)
         
             
             cpu_time = time.time() - start_time
@@ -474,7 +473,10 @@ class IntegratorSwitchingEnv(gym.Env):
             # Species errors (relative where possible)
             species_errors = []
             for idx in self.representative_species_indices:
-                species_error = np.abs((state)[idx+1] - (ref_state)[idx+1])
+                s  = max(1e-12, (state)[idx+1])
+                sr = max(1e-12, (ref_state)[idx+1])
+                species_error = abs(s - sr) / sr  # relative with floor
+
                 species_errors.append(species_error)
             
             # Combined error (weighted average)
@@ -486,6 +488,69 @@ class IntegratorSwitchingEnv(gym.Env):
             total_error = 0.0
             
         return total_error
+    
+    def _build_fresh_solver(self, action, init_state):
+        """
+        Build a fresh solver instance matching solver_configs[action],
+        initialized at t=0 with the given state (temperature + Y).
+        """
+        cfg = self.solver_configs[action]
+        # Make a temporary Cantera Solution with the right TPY
+        gas_tmp = ct.Solution(self.mechanism_file)
+        gas_tmp.TPY = init_state[0], self.current_pressure, init_state[1:]
+        # Initial state vector (T + Y) already in 'init_state'
+        # Create a new solver via your factory
+        solver = create_solver(
+            cfg['type'], cfg, gas_tmp, init_state, 0.0, self.current_pressure,
+            mxsteps=cfg.get('mxsteps', 1000)
+        )
+        return solver, gas_tmp
+
+    def _obs_from_arbitrary_state(self, state, set_last_obs=False):
+        """
+        Compute observation (with your trend features if you added them) from an arbitrary state
+        WITHOUT mutating the live env's state/time. Useful to build ref-anchored training samples.
+        """
+        # snapshot live
+        live_TPY = (self.gas.T, self.current_pressure, self.gas.Y.copy())
+        live_last_obs = None if not hasattr(self, 'last_obs') else (None if self.last_obs is None else self.last_obs.copy())
+
+        # temporarily set gas to 'state'
+        self.gas.TPY = state[0], self.current_pressure, state[1:]
+
+        # build base obs like in _get_observation
+        temp = state[0]
+        key_vals = []
+        for spec in self.key_species:
+            try:
+                idx = self.gas.species_index(spec)
+                key_vals.append(state[1:][idx])
+            except ValueError:
+                key_vals.append(0.0)
+        temp_norm = (temp - 300.0) / 2000.0
+        species_log = np.log10(np.maximum(key_vals, 1e-20))
+        pressure_log = np.log10(self.current_pressure / ct.one_atm)
+        base_obs = np.hstack([temp_norm, species_log, pressure_log]).astype(np.float32)
+
+        # trend features if present
+        if hasattr(self, 'last_obs'):
+            if self.last_obs is None:
+                trend = np.zeros_like(base_obs, dtype=np.float32)
+            else:
+                trend = base_obs - self.last_obs
+            obs = np.hstack([base_obs, trend]).astype(np.float32)
+            if set_last_obs:
+                self.last_obs = base_obs.copy()
+        else:
+            obs = base_obs
+
+        # restore live
+        self.gas.TPY = live_TPY[0], live_TPY[1], live_TPY[2]
+        if hasattr(self, 'last_obs'):
+            self.last_obs = live_last_obs
+
+        return obs
+
     
     def _get_info(self):
         """Get environment info"""
@@ -510,9 +575,7 @@ class IntegratorSwitchingEnv(gym.Env):
                 'ignition_time': self.ignition_time,
                 'reached_steady_state': self.reached_steady_state,
                 'current_time': self.current_time,
-            },
-            'gibbs_free_energy': self.gibbs_free_energy[-1],
-            'gibbs_free_energy_history': self.gibbs_free_energy
+            }
             }
     
     def get_solver_names(self):

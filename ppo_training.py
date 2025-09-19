@@ -1424,9 +1424,9 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
                        help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 1],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 10],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-2, 1e-1],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
