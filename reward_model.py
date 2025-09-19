@@ -28,6 +28,7 @@ class LagrangeReward1:
 
         # Violation: zero if below epsilon; linear above
         violation = max(err / (self.epsilon + 1e-12) - 1.0, 0.0)
+        #print(f"Violation: {violation} - Error: {err} - Epsilon: {self.epsilon}")
         self._violations.append(violation)
 
         r = cpu_term - self.lambda_ * violation
@@ -42,7 +43,7 @@ class LagrangeReward1:
             r_bonus = 0.0
             
         r += r_bonus
-        reward = float(np.clip(r, -2, self.reward_clip))
+        reward = float(np.clip(r, -self.reward_clip, self.reward_clip))
         return reward
 
     def end_episode_update_lambda(self):

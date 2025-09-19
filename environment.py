@@ -473,12 +473,13 @@ class IntegratorSwitchingEnv(gym.Env):
             # Species errors (relative where possible)
             species_errors = []
             for idx in self.representative_species_indices:
-                s  = max(1e-12, (state)[idx+1])
-                sr = max(1e-12, (ref_state)[idx+1])
-                species_error = abs(s - sr) / sr  # relative with floor
+                s  = np.log10(max(1e-12, (state)[idx+1]))
+                sr = np.log10(max(1e-12, (ref_state)[idx+1]))
+                species_error = abs(abs(s - sr) / sr)  # relative with floor
 
                 species_errors.append(species_error)
             
+            #print(f"Species errors mean: {np.mean(species_errors)}, Temp error: {temp_error}, max: {np.max(species_errors)}, min: {np.min(species_errors)}")
             # Combined error (weighted average)
             total_error = 0.3 * temp_error + 0.7 * np.mean(species_errors)
             
