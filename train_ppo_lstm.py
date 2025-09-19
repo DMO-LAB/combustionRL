@@ -200,6 +200,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         condition_action_distribution = {0: 0, 1: 0}
         
         done = False
+        pbar = tqdm(total=args.max_eval_steps, desc="Evaluation")
         while not done and episode_length < args.max_eval_steps:
             # Normalize observation
             obs_n = obs_rms.normalize(obs)
@@ -227,7 +228,14 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             episode_length += 1
             obs = obs_next
             done = terminated or truncated
-        
+            pbar.set_postfix({
+                'T': f'{env.current_state[0]:.1f}K',
+                'A': action,
+                'R': f'{reward:.1f}',
+                'C': f'{info["cpu_time"]:.3f}s'
+            })
+            pbar.update(1)
+        pbar.close()
         # Store condition-specific results
         condition_summary = {
             'reward': episode_reward,
@@ -349,6 +357,9 @@ def train(args):
         csv.writer(f).writerow(["steps","ep_reward","mean_cpu","viol_rate","loss_pi","loss_v","entropy","approx_kl","clip_frac"])
 
     global_step = 0
+    tbar = tqdm(total=args.total_updates, desc="Training")
+    mean_cpu = 0.0
+    viol_rate = 0.0
     for update in range(1, args.total_updates + 1):
         # ----------------- collect rollout -----------------
         buffer.reset()
@@ -451,7 +462,7 @@ def train(args):
         mean_ep_r = float(np.mean(ep_rewards)) if ep_rewards else 0.0
         mean_cpu  = float(np.mean(cpu_times)) if cpu_times else 0.0
         viol_rate = float(np.mean(violations)) if violations else 0.0
-
+        tbar.set_postfix({'Update': update, 'Global Step': global_step, 'Mean CPU': mean_cpu, 'Violation Rate': viol_rate})
         log["steps"].append(global_step)
         log["ep_reward"].append(mean_ep_r)
         log["mean_cpu"].append(mean_cpu)
@@ -527,6 +538,8 @@ def train(args):
                                    condition_data['episode_length'], condition_data['action_0_ratio'],
                                    condition_data['action_1_ratio']])
 
+            tbar.set_postfix({'Update': update, 'Global Step': global_step, 'Mean CPU': mean_cpu, 'Violation Rate': viol_rate})
+            tbar.update(1)
     # final artifacts
     save_training_plots(log, args.out_dir)
     torch.save(policy.state_dict(), os.path.join(args.out_dir, "ppo_lstm_final.pt"))
@@ -541,7 +554,8 @@ def train(args):
     final_eval_summary, final_eval_results = evaluate_policy(
         policy, env, obs_rms, device, args, neptune_run, args.total_updates
     )
-    
+    tbar.set_postfix({'Update': update, 'Global Step': global_step, 'Mean CPU': mean_cpu, 'Violation Rate': viol_rate})
+    tbar.update(1)
     # Log final model artifacts to Neptune
     if neptune_run:
         neptune_run["artifacts/final_model"].upload(os.path.join(args.out_dir, "ppo_lstm_final.pt"))
@@ -551,7 +565,7 @@ def train(args):
         
         # Log final evaluation summary
         neptune_run["final_eval"] = final_eval_summary
-        
+            
         # Stop Neptune run
         neptune_run.stop()
     
