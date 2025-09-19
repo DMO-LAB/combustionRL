@@ -543,11 +543,21 @@ def train(args):
     # final artifacts
     save_training_plots(log, args.out_dir)
     torch.save(policy.state_dict(), os.path.join(args.out_dir, "ppo_lstm_final.pt"))
-    # TorchScript for easier deployment
-    example_obs = torch.from_numpy(obs0.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,D]
-    h0 = torch.zeros(1, 1, args.hidden); c0 = torch.zeros(1, 1, args.hidden)
-    scripted = torch.jit.trace(lambda o,h,c: policy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
-    scripted.save(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
+    policy.eval()  # Set to eval mode for TorchScript tracing
+    with torch.no_grad():  # Disable gradients for tracing
+        example_obs = torch.from_numpy(obs0.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,D]
+        h0 = torch.zeros(1, 1, args.hidden); c0 = torch.zeros(1, 1, args.hidden)
+        scripted = torch.jit.trace(lambda o,h,c: policy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
+        scripted.save(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
+    print(f"[done] training complete. Artifacts in: {args.out_dir}")
+
+    
+    
+    # # TorchScript for easier deployment
+    # example_obs = torch.from_numpy(obs0.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,D]
+    # h0 = torch.zeros(1, 1, args.hidden); c0 = torch.zeros(1, 1, args.hidden)
+    # scripted = torch.jit.trace(lambda o,h,c: policy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
+    # scripted.save(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
     
     # Final evaluation
     print("[eval] Running final evaluation...")
@@ -565,7 +575,7 @@ def train(args):
         
         # Log final evaluation summary
         neptune_run["final_eval"] = final_eval_summary
-            
+
         # Stop Neptune run
         neptune_run.stop()
     

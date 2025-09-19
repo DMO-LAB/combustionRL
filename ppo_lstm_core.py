@@ -217,6 +217,8 @@ class PPO:
         device = cfg.device
         log_info = {"loss_pi": 0.0, "loss_v": 0.0, "entropy": 0.0, "approx_kl": 0.0, "clip_frac": 0.0, "count": 0}
 
+
+        policy.train()
         for _ in range(cfg.epochs):
             # iterate recurrent mini-batches
             for obs, acts, oldlp, oldv, advb, retb, h0, c0 in buffer.iter_minibatches(
