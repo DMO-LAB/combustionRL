@@ -37,3 +37,5 @@ pytest>=7.0.0
 
 # Logging and Monitoring
 tensorboard>=2.13.0
+neptune>=1.0.0
+python-dotenv>=1.0.0

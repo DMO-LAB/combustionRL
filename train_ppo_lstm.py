@@ -1,7 +1,6 @@
 # train_ppo_lstm.py
 # From-scratch PPO + LSTM training on IntegratorSwitchingEnv
 # - Optional warm start from switcher_classifier.pt
-# - Uses confidence gate + hysteresis during rollouts
 # - Logs CPU time & timestep error; saves publication-quality plots
 # - Saves checkpoints and a final TorchScript export
 
@@ -15,10 +14,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import cantera as ct
 from tqdm import tqdm
+from dotenv import load_dotenv
+import neptune
+from neptune.types import File
 from environment import IntegratorSwitchingEnv
 from reward_model import LagrangeReward1
 from ppo_lstm_core import RunningMeanStd, BufferConfig, RolloutBufferRecurrent, PolicyLSTM, PPO, PPOConfig
 from shielded_policy import SwitcherMLP, ShieldedPolicy
+
+# Load environment variables
+load_dotenv()
 
 # ----------------------------- Matplotlib aesthetics -----------------------------
 plt.rcParams.update({
@@ -87,10 +92,224 @@ def maybe_load_classifier_init(policy: PolicyLSTM, classifier_path: str, obs_dim
     except Exception as e:
         print(f"[init] Could not warm-start from classifier ({e}). Continuing with random init.")
 
+def setup_neptune_logging(args):
+    """Initialize Neptune logging"""
+    try:
+        api_token = os.getenv('NEPTUNE_API_TOKEN')
+        project = os.getenv('NEPTUNE_PROJECT')
+        
+        if not api_token or not project:
+            print("[neptune] Missing NEPTUNE_API_TOKEN or NEPTUNE_PROJECT in .env file. Skipping Neptune logging.")
+            return None
+            
+        run = neptune.init_run(
+            project=project,
+            api_token=api_token,
+            name=f"ppo_lstm_{args.fuel}_{args.mechanism.split('/')[-1].split('.')[0]}",
+            tags=["ppo", "lstm", "combustion", "rl"]
+        )
+        
+        # Log hyperparameters
+        run["hyperparameters"] = {
+            "mechanism": args.mechanism,
+            "fuel": args.fuel,
+            "epsilon": args.epsilon,
+            "hidden_size": args.hidden,
+            "gamma": args.gamma,
+            "lam": args.lam,
+            "clip_coef": args.clip_coef,
+            "vf_coef": args.vf_coef,
+            "ent_coef": args.ent_coef,
+            "max_grad_norm": args.max_grad_norm,
+            "lr": args.lr,
+            "epochs": args.epochs,
+            "seq_len": args.seq_len,
+            "batch_seqs": args.batch_seqs,
+            "target_kl": args.target_kl,
+            "rollout_steps": args.rollout_steps,
+            "total_updates": args.total_updates,
+            "pmin": args.pmin,
+            "hold_K": args.hold_K,
+            "eval_episodes": args.eval_episodes,
+            "eval_interval": args.eval_interval,
+            "eval_time": args.eval_time,
+            "eval_temperatures": args.eval_temperatures,
+            "eval_pressures": args.eval_pressures,
+            "eval_phis": args.eval_phis
+        }
+        
+        print(f"[neptune] Logging initialized: {run.get_url()}")
+        return run
+    except Exception as e:
+        print(f"[neptune] Failed to initialize Neptune logging: {e}")
+        return None
+
+def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: RunningMeanStd, 
+                   device: torch.device, args, neptune_run=None, update: int = 0):
+    """Evaluate policy deterministically over fixed test conditions"""
+    policy.eval()
+    
+    # Define fixed test conditions for consistent evaluation
+    # Generate all combinations of the provided temperature, pressure, and phi values
+    test_conditions = []
+    for i, temp in enumerate(args.eval_temperatures):
+        for j, pressure in enumerate(args.eval_pressures):
+            for k, phi in enumerate(args.eval_phis):
+                condition_name = f"T{temp:.0f}_P{pressure:.1f}_Phi{phi:.2f}"
+                test_conditions.append({
+                    "temperature": temp,
+                    "pressure": pressure,
+                    "phi": phi,
+                    "name": condition_name
+                })
+    
+    eval_results = {
+        'condition_results': {},
+        'overall_rewards': [],
+        'overall_cpu_times': [],
+        'overall_violations': [],
+        'overall_errors': [],
+        'overall_lengths': [],
+        'overall_action_distribution': {0: 0, 1: 0}
+    }
+    
+    print(f"[eval] Starting evaluation over {len(test_conditions)} fixed test conditions...")
+    
+    for condition in test_conditions:
+        condition_name = condition["name"]
+        print(f"[eval] Testing condition: {condition_name}")
+        
+        # Reset environment with fixed initial conditions
+        obs, _ = env.reset(
+            temperature=condition["temperature"],
+            pressure=condition["pressure"] * ct.one_atm,
+            phi=condition["phi"],
+            total_time=args.eval_time,  # Fixed evaluation time
+            dt=args.dt, etol=args.epsilon
+        )
+        
+        # Initialize LSTM hidden states
+        hx = torch.zeros(args.hidden, device=device)
+        cx = torch.zeros(args.hidden, device=device)
+        
+        episode_reward = 0.0
+        episode_cpu_times = []
+        episode_violations = []
+        episode_errors = []
+        episode_length = 0
+        condition_action_distribution = {0: 0, 1: 0}
+        
+        done = False
+        while not done and episode_length < args.max_eval_steps:
+            # Normalize observation
+            obs_n = obs_rms.normalize(obs)
+            
+            # Get deterministic action (argmax of policy output)
+            with torch.no_grad():
+                logits, values, _ = policy(
+                    torch.from_numpy(obs_n).to(device).unsqueeze(0).unsqueeze(0),
+                    hx.unsqueeze(0), cx.unsqueeze(0)
+                )
+                probs = F.softmax(logits, dim=-1)
+                action = torch.argmax(probs.squeeze()).item()
+            
+            # Environment step
+            obs_next, reward, terminated, truncated, info = env.step(action)
+            
+            # Collect metrics
+            episode_reward += reward
+            episode_cpu_times.append(info.get("cpu_time", 0.0))
+            episode_violations.append(1.0 if info.get("timestep_error", 0.0) > args.epsilon else 0.0)
+            episode_errors.append(info.get("timestep_error", 0.0))
+            condition_action_distribution[action] += 1
+            eval_results['overall_action_distribution'][action] += 1
+            
+            episode_length += 1
+            obs = obs_next
+            done = terminated or truncated
+        
+        # Store condition-specific results
+        condition_summary = {
+            'reward': episode_reward,
+            'mean_cpu_time': np.mean(episode_cpu_times) if episode_cpu_times else 0.0,
+            'mean_violation_rate': np.mean(episode_violations) if episode_violations else 0.0,
+            'mean_error': np.mean(episode_errors) if episode_errors else 0.0,
+            'episode_length': episode_length,
+            'action_0_ratio': condition_action_distribution[0] / sum(condition_action_distribution.values()) if sum(condition_action_distribution.values()) > 0 else 0.0,
+            'action_1_ratio': condition_action_distribution[1] / sum(condition_action_distribution.values()) if sum(condition_action_distribution.values()) > 0 else 0.0,
+            'temperature': condition["temperature"],
+            'pressure': condition["pressure"],
+            'phi': condition["phi"]
+        }
+        
+        eval_results['condition_results'][condition_name] = condition_summary
+        
+        # Add to overall results
+        eval_results['overall_rewards'].append(episode_reward)
+        eval_results['overall_cpu_times'].append(condition_summary['mean_cpu_time'])
+        eval_results['overall_violations'].append(condition_summary['mean_violation_rate'])
+        eval_results['overall_errors'].append(condition_summary['mean_error'])
+        eval_results['overall_lengths'].append(episode_length)
+    
+    policy.train()  # Switch back to training mode
+    
+    # Compute overall summary statistics
+    eval_summary = {
+        'mean_reward': np.mean(eval_results['overall_rewards']),
+        'std_reward': np.std(eval_results['overall_rewards']),
+        'mean_cpu_time': np.mean(eval_results['overall_cpu_times']),
+        'mean_violation_rate': np.mean(eval_results['overall_violations']),
+        'mean_error': np.mean(eval_results['overall_errors']),
+        'mean_episode_length': np.mean(eval_results['overall_lengths']),
+        'action_0_ratio': eval_results['overall_action_distribution'][0] / sum(eval_results['overall_action_distribution'].values()) if sum(eval_results['overall_action_distribution'].values()) > 0 else 0.0,
+        'action_1_ratio': eval_results['overall_action_distribution'][1] / sum(eval_results['overall_action_distribution'].values()) if sum(eval_results['overall_action_distribution'].values()) > 0 else 0.0,
+        'condition_results': eval_results['condition_results']
+    }
+    
+    print(f"[eval] Update {update} - Overall Mean Reward: {eval_summary['mean_reward']:.3f} ± {eval_summary['std_reward']:.3f}")
+    print(f"[eval] Overall Mean CPU Time: {eval_summary['mean_cpu_time']:.4f}s, Violation Rate: {eval_summary['mean_violation_rate']:.3f}")
+    print(f"[eval] Overall Action Distribution: CVODE={eval_summary['action_0_ratio']:.2f}, QSS={eval_summary['action_1_ratio']:.2f}")
+    
+    # Print condition-specific results
+    print(f"[eval] Condition-specific results:")
+    for condition_name, condition_data in eval_results['condition_results'].items():
+        print(f"  {condition_name}: Reward={condition_data['reward']:.3f}, CPU={condition_data['mean_cpu_time']:.4f}s, "
+              f"Viol={condition_data['mean_violation_rate']:.3f}, CVODE={condition_data['action_0_ratio']:.2f}")
+    
+    # Log to Neptune
+    if neptune_run:
+        # Overall metrics
+        neptune_run[f"eval/update_{update}/overall/mean_reward"] = eval_summary['mean_reward']
+        neptune_run[f"eval/update_{update}/overall/std_reward"] = eval_summary['std_reward']
+        neptune_run[f"eval/update_{update}/overall/mean_cpu_time"] = eval_summary['mean_cpu_time']
+        neptune_run[f"eval/update_{update}/overall/mean_violation_rate"] = eval_summary['mean_violation_rate']
+        neptune_run[f"eval/update_{update}/overall/mean_error"] = eval_summary['mean_error']
+        neptune_run[f"eval/update_{update}/overall/mean_episode_length"] = eval_summary['mean_episode_length']
+        neptune_run[f"eval/update_{update}/overall/action_0_ratio"] = eval_summary['action_0_ratio']
+        neptune_run[f"eval/update_{update}/overall/action_1_ratio"] = eval_summary['action_1_ratio']
+        
+        # Condition-specific metrics
+        for condition_name, condition_data in eval_results['condition_results'].items():
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/reward"] = condition_data['reward']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/mean_cpu_time"] = condition_data['mean_cpu_time']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/mean_violation_rate"] = condition_data['mean_violation_rate']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/mean_error"] = condition_data['mean_error']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/episode_length"] = condition_data['episode_length']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/action_0_ratio"] = condition_data['action_0_ratio']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/action_1_ratio"] = condition_data['action_1_ratio']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/temperature"] = condition_data['temperature']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/pressure"] = condition_data['pressure']
+            neptune_run[f"eval/update_{update}/conditions/{condition_name}/phi"] = condition_data['phi']
+    
+    return eval_summary, eval_results
+
 # ----------------------------- Training loop -----------------------------
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     env = make_env(args)
+
+    # Initialize Neptune logging
+    neptune_run = setup_neptune_logging(args)
 
     # peek obs dim
     obs0, _ = env.reset(temperature=np.random.uniform(*env.temp_range),
@@ -162,17 +381,6 @@ def train(args):
                 act_sample, logprob, value, probs, (hx_new, cx_new) = policy.step(
                     torch.from_numpy(obs_n).to(device), hx, cx
                 )
-                # shielded decision (confidence gate + hysteresis)
-                # recompute probs on CPU np:
-                # probs_np = probs.cpu().numpy()
-                # a_exec = int(np.argmax(probs_np)) if probs_np.max() >= args.pmin else 0
-                # # respect hysteresis: if shield changed action to 0, shield will latch internally
-                # shield._hold = getattr(shield, "_hold", 0)  # ensure field exists
-                # if shield._hold > 0:
-                #     shield._hold -= 1
-                #     a_exec = 0
-                # elif a_exec == 0:
-                #     shield._hold = args.hold_K
                 a_exec = act_sample
                 # compute logprob of the executed action from current dist
                 dist = torch.distributions.Categorical(probs=probs)
@@ -251,6 +459,18 @@ def train(args):
         for k in ["loss_pi","loss_v","entropy","approx_kl","clip_frac"]:
             log[k].append(train_info[k])
 
+        # Log to Neptune
+        if neptune_run:
+            neptune_run["train/episode_reward"].append(mean_ep_r)
+            neptune_run["train/mean_cpu_time"].append(mean_cpu)
+            neptune_run["train/violation_rate"].append(viol_rate)
+            neptune_run["train/policy_loss"].append(train_info["loss_pi"])
+            neptune_run["train/value_loss"].append(train_info["loss_v"])
+            neptune_run["train/entropy"].append(train_info["entropy"])
+            neptune_run["train/approx_kl"].append(train_info["approx_kl"])
+            neptune_run["train/clip_frac"].append(train_info["clip_frac"])
+            neptune_run["train/global_step"].append(global_step)
+
         with open(csv_path, "a", newline="") as f:
             csv.writer(f).writerow([global_step, mean_ep_r, mean_cpu, viol_rate,
                                     train_info["loss_pi"], train_info["loss_v"],
@@ -265,6 +485,48 @@ def train(args):
             torch.save(policy.state_dict(), path)
             print(f"[ckpt] saved {path}")
 
+        # ----------------- evaluation -----------------
+        if update % args.eval_interval == 0:
+            eval_summary, eval_results = evaluate_policy(
+                policy, env, obs_rms, device, args, neptune_run, update
+            )
+            
+            # Save evaluation results to CSV
+            eval_csv_path = os.path.join(args.out_dir, "eval_log.csv")
+            eval_file_exists = os.path.exists(eval_csv_path)
+            with open(eval_csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if not eval_file_exists:
+                    # Overall metrics header
+                    writer.writerow(["update", "overall_mean_reward", "overall_std_reward", "overall_mean_cpu_time", 
+                                   "overall_mean_violation_rate", "overall_mean_error", "overall_mean_episode_length",
+                                   "overall_action_0_ratio", "overall_action_1_ratio"])
+                
+                # Write overall metrics
+                writer.writerow([update, eval_summary['mean_reward'], eval_summary['std_reward'],
+                               eval_summary['mean_cpu_time'], eval_summary['mean_violation_rate'],
+                               eval_summary['mean_error'], eval_summary['mean_episode_length'],
+                               eval_summary['action_0_ratio'], eval_summary['action_1_ratio']])
+            
+            # Save condition-specific results to separate CSV
+            condition_csv_path = os.path.join(args.out_dir, "eval_conditions_log.csv")
+            condition_file_exists = os.path.exists(condition_csv_path)
+            with open(condition_csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if not condition_file_exists:
+                    writer.writerow(["update", "condition_name", "temperature", "pressure", "phi",
+                                   "reward", "mean_cpu_time", "mean_violation_rate", "mean_error",
+                                   "episode_length", "action_0_ratio", "action_1_ratio"])
+                
+                # Write condition-specific metrics
+                for condition_name, condition_data in eval_summary['condition_results'].items():
+                    writer.writerow([update, condition_name, condition_data['temperature'], 
+                                   condition_data['pressure'], condition_data['phi'],
+                                   condition_data['reward'], condition_data['mean_cpu_time'],
+                                   condition_data['mean_violation_rate'], condition_data['mean_error'],
+                                   condition_data['episode_length'], condition_data['action_0_ratio'],
+                                   condition_data['action_1_ratio']])
+
     # final artifacts
     save_training_plots(log, args.out_dir)
     torch.save(policy.state_dict(), os.path.join(args.out_dir, "ppo_lstm_final.pt"))
@@ -273,6 +535,26 @@ def train(args):
     h0 = torch.zeros(1, 1, args.hidden); c0 = torch.zeros(1, 1, args.hidden)
     scripted = torch.jit.trace(lambda o,h,c: policy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
     scripted.save(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
+    
+    # Final evaluation
+    print("[eval] Running final evaluation...")
+    final_eval_summary, final_eval_results = evaluate_policy(
+        policy, env, obs_rms, device, args, neptune_run, args.total_updates
+    )
+    
+    # Log final model artifacts to Neptune
+    if neptune_run:
+        neptune_run["artifacts/final_model"].upload(os.path.join(args.out_dir, "ppo_lstm_final.pt"))
+        neptune_run["artifacts/scripted_model"].upload(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
+        neptune_run["artifacts/training_log"].upload(os.path.join(args.out_dir, "train_log.csv"))
+        neptune_run["artifacts/eval_log"].upload(os.path.join(args.out_dir, "eval_log.csv"))
+        
+        # Log final evaluation summary
+        neptune_run["final_eval"] = final_eval_summary
+        
+        # Stop Neptune run
+        neptune_run.stop()
+    
     print(f"[done] training complete. Artifacts in: {args.out_dir}")
 
 
@@ -323,6 +605,20 @@ if __name__ == "__main__":
     # init from classifier
     ap.add_argument("--init_classifier", type=str, default="switcher_classifierII.pt")
     ap.add_argument("--from_scratch", action="store_true")
+
+    # evaluation
+    ap.add_argument("--eval_interval", type=int, default=10, help="Evaluate every N updates")
+    ap.add_argument("--eval_episodes", type=int, default=20, help="Number of episodes for evaluation (deprecated - now uses fixed conditions)")
+    ap.add_argument("--max_eval_steps", type=int, default=200, help="Maximum steps per evaluation episode")
+    ap.add_argument("--eval_time", type=float, default=1e-2, help="Fixed evaluation time for all test conditions")
+    
+    # Fixed evaluation conditions (lists of temperatures, pressures, and phis)
+    ap.add_argument("--eval_temperatures", type=float, nargs='+', default=[650.0, 1000.0, 1100.0], 
+                   help="List of temperatures for evaluation (e.g., --eval_temperatures 800 1000 1200)")
+    ap.add_argument("--eval_pressures", type=float, nargs='+', default=[5.0, 3.0, 1.0], 
+                   help="List of pressures (bar) for evaluation (e.g., --eval_pressures 1.0 3.0 5.0)")
+    ap.add_argument("--eval_phis", type=float, nargs='+', default=[1, 1, 1.2], 
+                   help="List of phi values for evaluation (e.g., --eval_phis 0.8 1.0 1.2)")
 
     # misc
     ap.add_argument("--out_dir", type=str, default="ppo_runs/run1")
