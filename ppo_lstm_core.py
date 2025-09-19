@@ -225,6 +225,7 @@ class PPO:
                 obs_t  = torch.as_tensor(obs, dtype=torch.float32, device=device)     # [B,T,D]
                 acts_t = torch.as_tensor(acts, dtype=torch.long, device=device)       # [B,T]
                 oldlp_t= torch.as_tensor(oldlp, dtype=torch.float32, device=device)   # [B,T]
+                oldv_t = torch.as_tensor(oldv, dtype=torch.float32, device=device)     # [B,T]
                 ret_t  = torch.as_tensor(retb, dtype=torch.float32, device=device)    # [B,T]
                 adv_t  = torch.as_tensor(advb, dtype=torch.float32, device=device)    # [B,T]
                 h0_t   = torch.as_tensor(h0, dtype=torch.float32, device=device)      # [B,H]
@@ -242,7 +243,7 @@ class PPO:
                 clipped = torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef) * adv_t
                 loss_pi = -torch.mean(torch.min(unclipped, clipped))
                 # value loss clipping
-                v_clipped = oldv + torch.clamp(values - oldv, -cfg.clip_coef, cfg.clip_coef)
+                v_clipped = oldv_t + torch.clamp(values - oldv_t, -cfg.clip_coef, cfg.clip_coef)
                 loss_v = 0.5 * torch.mean(torch.max((values - ret_t)**2, (v_clipped - ret_t)**2))
                 # entropy bonus
                 loss_ent = entropy
