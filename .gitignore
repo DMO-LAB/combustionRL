@@ -110,3 +110,5 @@ models/
 # Evaluation results
 evaluations/
 !evaluations/README.md
+eval_outputs/
+stress_outputs/
