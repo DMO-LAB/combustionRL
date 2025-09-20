@@ -152,16 +152,15 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
     # Define fixed test conditions for consistent evaluation
     # Generate all combinations of the provided temperature, pressure, and phi values
     test_conditions = []
-    for i, temp in enumerate(args.eval_temperatures):
-        for j, pressure in enumerate(args.eval_pressures):
-            for k, phi in enumerate(args.eval_phis):
-                condition_name = f"T{temp:.0f}_P{pressure:.1f}_Phi{phi:.2f}"
-                test_conditions.append({
-                    "temperature": temp,
-                    "pressure": pressure,
-                    "phi": phi,
-                    "name": condition_name
-                })
+    for temp, pressure, phi in zip(args.eval_temperatures, args.eval_pressures, args.eval_phis):
+    
+        condition_name = f"T{temp:.0f}_P{pressure:.1f}_Phi{phi:.2f}"
+        test_conditions.append({
+            "temperature": temp,
+            "pressure": pressure,
+            "phi": phi,
+            "name": condition_name
+        })
     
     eval_results = {
         'condition_results': {},
@@ -228,8 +227,9 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             episode_length += 1
             obs = obs_next
             done = terminated or truncated
+            ref_temp = env.ref_states[env.current_episode * env.super_steps, 0]
             pbar.set_postfix({
-                'T': f'{env.current_state[0]:.1f}K',
+                'T': f'{env.current_state[0]:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K',
                 'A': action,
                 'R': f'{reward:.1f}',
                 'C': f'{info["cpu_time"]:.3f}s'
@@ -634,7 +634,7 @@ if __name__ == "__main__":
     ap.add_argument("--eval_interval", type=int, default=10, help="Evaluate every N updates")
     ap.add_argument("--eval_episodes", type=int, default=20, help="Number of episodes for evaluation (deprecated - now uses fixed conditions)")
     ap.add_argument("--max_eval_steps", type=int, default=200, help="Maximum steps per evaluation episode")
-    ap.add_argument("--eval_time", type=float, default=1e-2, help="Fixed evaluation time for all test conditions")
+    ap.add_argument("--eval_time", type=float, default=5e-2, help="Fixed evaluation time for all test conditions")
     
     # Fixed evaluation conditions (lists of temperatures, pressures, and phis)
     ap.add_argument("--eval_temperatures", type=float, nargs='+', default=[650.0, 1000.0, 1100.0], 
