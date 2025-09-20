@@ -208,7 +208,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             # Get deterministic action (argmax of policy output)
             with torch.no_grad():
                 logits, values, _ = policy(
-                    torch.from_numpy(obs_n).to(device).unsqueeze(0).unsqueeze(0),
+                    torch.from_numpy(obs_n).to(device).unsqueeze(0).unsqueeze(0).float(),
                     hx.unsqueeze(0), cx.unsqueeze(0)
                 )
                 probs = F.softmax(logits, dim=-1)
@@ -449,7 +449,7 @@ def train(args):
         # bootstrap last value for GAE
         with torch.no_grad():
             obs_last_n = obs_rms.normalize(obs).astype(np.float32)
-            obs_last_t = torch.from_numpy(obs_last_n).to(device).unsqueeze(0).unsqueeze(0)
+            obs_last_t = torch.from_numpy(obs_last_n).to(device).unsqueeze(0).unsqueeze(0).float()
             logits_last, values_last, _ = policy(obs_last_t, hx.unsqueeze(0), cx.unsqueeze(0))
             last_value = float(values_last.squeeze().cpu().item())
 
@@ -496,8 +496,9 @@ def train(args):
             torch.save(policy.state_dict(), path)
             print(f"[ckpt] saved {path}")
 
+
         # ----------------- evaluation -----------------
-        if update % args.eval_interval == 0:
+        if update-1 % args.eval_interval == 0:
             eval_summary, eval_results = evaluate_policy(
                 policy, env, obs_rms, device, args, neptune_run, update
             )
@@ -538,8 +539,8 @@ def train(args):
                                    condition_data['episode_length'], condition_data['action_0_ratio'],
                                    condition_data['action_1_ratio']])
 
-            tbar.set_postfix({'Update': update, 'Global Step': global_step, 'Mean CPU': mean_cpu, 'Violation Rate': viol_rate})
-            tbar.update(1)
+        tbar.set_postfix({'Update': update, 'Global Step': global_step, 'Mean CPU': mean_cpu, 'Violation Rate': viol_rate})
+        tbar.update(1)
     # final artifacts
     save_training_plots(log, args.out_dir)
     torch.save(policy.state_dict(), os.path.join(args.out_dir, "ppo_lstm_final.pt"))
@@ -564,8 +565,7 @@ def train(args):
     final_eval_summary, final_eval_results = evaluate_policy(
         policy, env, obs_rms, device, args, neptune_run, args.total_updates
     )
-    tbar.set_postfix({'Update': update, 'Global Step': global_step, 'Mean CPU': mean_cpu, 'Violation Rate': viol_rate})
-    tbar.update(1)
+   
     # Log final model artifacts to Neptune
     if neptune_run:
         neptune_run["artifacts/final_model"].upload(os.path.join(args.out_dir, "ppo_lstm_final.pt"))
