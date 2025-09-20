@@ -43,7 +43,9 @@ def make_env(args):
         temp_range=(args.T_low, args.T_high), phi_range=(args.phi_low, args.phi_high),
         pressure_range=(int(args.P_low), int(args.P_high)),
         time_range=(args.time_low, args.time_high),
-        dt_range=(args.dt, args.dt), etol=args.epsilon, verbose=False,
+        dt_range=(args.dt, args.dt), etol=args.epsilon, 
+        horizon=args.horizon,
+        verbose=False,
         termination_count_threshold=100,
         reward_function=LagrangeReward1(**reward_cfg),
         precompute_reference=True, track_trajectory=True
@@ -433,7 +435,7 @@ def train(args):
                 hx.zero_(); cx.zero_()
             pbar.update(1)
             temp = env.current_state[0]
-            ref_temp = env.ref_states[env.current_episode * env.super_steps, 0]
+            ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
             pbar.set_postfix({
                 'T': f'{temp:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K',
                 'A': a_exec,
@@ -590,7 +592,7 @@ if __name__ == "__main__":
     ap.add_argument("--fuel", type=str, default="nc12h26")
     ap.add_argument("--oxidizer", type=str, default="O2:0.21, N2:0.79")
     ap.add_argument("--epsilon", type=float, default=1e-3)
-
+    ap.add_argument("--horizon", type=int, default=100)
     # IC sampling ranges for training (curriculum-like)
     ap.add_argument("--T_low", type=float, default=600.0)
     ap.add_argument("--T_high", type=float, default=1200.0)
@@ -634,12 +636,12 @@ if __name__ == "__main__":
     ap.add_argument("--eval_interval", type=int, default=10, help="Evaluate every N updates")
     ap.add_argument("--eval_episodes", type=int, default=20, help="Number of episodes for evaluation (deprecated - now uses fixed conditions)")
     ap.add_argument("--max_eval_steps", type=int, default=200, help="Maximum steps per evaluation episode")
-    ap.add_argument("--eval_time", type=float, default=5e-2, help="Fixed evaluation time for all test conditions")
+    ap.add_argument("--eval_time", type=float, default=1e-1, help="Fixed evaluation time for all test conditions")
     
     # Fixed evaluation conditions (lists of temperatures, pressures, and phis)
     ap.add_argument("--eval_temperatures", type=float, nargs='+', default=[650.0, 1000.0, 1100.0], 
                    help="List of temperatures for evaluation (e.g., --eval_temperatures 800 1000 1200)")
-    ap.add_argument("--eval_pressures", type=float, nargs='+', default=[5.0, 3.0, 1.0], 
+    ap.add_argument("--eval_pressures", type=float, nargs='+', default=[5.0, 10.0, 1.0], 
                    help="List of pressures (bar) for evaluation (e.g., --eval_pressures 1.0 3.0 5.0)")
     ap.add_argument("--eval_phis", type=float, nargs='+', default=[1, 1, 1.2], 
                    help="List of phi values for evaluation (e.g., --eval_phis 0.8 1.0 1.2)")

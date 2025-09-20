@@ -17,7 +17,6 @@ class IntegratorSwitchingEnv(gym.Env):
                  pressure_range=(1, 60), time_range=(1e-3, 1e-2),
                  dt_range=(1e-6, 1e-4),
                  dt=1e-6, etol=1e-3, super_steps=50,
-                 fixed_n_episodes=100,
                  reward_function=None,
                  ignition_temp_threshold=1600,  # Temperature threshold for ignition detection
                  steady_temp_tolerance=1.0,     # Temperature change tolerance for steady state
@@ -27,7 +26,8 @@ class IntegratorSwitchingEnv(gym.Env):
                  terminated_by_steady_state=False,
                  termination_count_threshold=50,
                  precompute_reference=False,
-                 track_trajectory=False):       # Time factor for steady state check
+                 track_trajectory=False,
+                 horizon=100):       # Time factor for steady state check
         
         super().__init__()
 
@@ -45,7 +45,6 @@ class IntegratorSwitchingEnv(gym.Env):
         # self.super_steps = super_steps
         self.etol = etol
         self.verbose = verbose
-        self.fixed_n_episodes = fixed_n_episodes
         # Steady state detection parameters
         self.ignition_temp_threshold = ignition_temp_threshold
         self.steady_temp_tolerance = steady_temp_tolerance
@@ -54,6 +53,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.termination_count_threshold = termination_count_threshold
         self.precompute_reference = precompute_reference
         self.track_trajectory = track_trajectory
+        self.horizon = horizon
         # Setup gas object
         self.gas = ct.Solution(mechanism_file)
         
@@ -77,7 +77,7 @@ class IntegratorSwitchingEnv(gym.Env):
         obs_size = 2 + len(self.key_species)  # base (T + species + pressure)
         self.observation_space = spaces.Box(low=-50., high=50., shape=(2*obs_size,), dtype=np.float32)
 
-        self.representative_species = ['ch4', 'o2', 'h2o', 'co2'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2']
+        self.representative_species = ['ch4', 'o2', 'h2o', 'co2', 'oh'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2', 'oh']
         self.representative_species_indices = [self._safe_species_index(spec) for spec in self.representative_species]
         # Initialize solver instances (will be created in reset)
         self.solvers = []
@@ -155,9 +155,9 @@ class IntegratorSwitchingEnv(gym.Env):
                              self.etol)
         
         total_episodes = int(self.total_time / self.dt)
-        self.super_steps = max(1, int(total_episodes / self.fixed_n_episodes))
-
-        self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
+        self.super_steps = max(1, int(total_episodes / self.horizon))
+        print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps} - horizon: {self.horizon} - total_time: {self.total_time}")
+        # self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
         if self.verbose:
             print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps}")
         
@@ -183,22 +183,20 @@ class IntegratorSwitchingEnv(gym.Env):
         self.initial_state = np.hstack([self.current_temp, self.gas.Y])
         self.current_state = self.initial_state.copy()
         
-        self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
         # Create reference trajectory
         if self.precompute_reference:
             self._compute_reference_trajectory()
         
-        # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
-        if self.precompute_reference:
-            if np.max(self.ref_states[:, 0]) < 600:
-                self.total_time = self.total_time/10
-                total_episodes = int(self.total_time / self.dt)
-                self.super_steps = max(1, int(total_episodes / self.fixed_n_episodes))
-                self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
-                if self.verbose:
-                    print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
+        # # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
+        # if self.precompute_reference:
+        #     if np.max(self.ref_states[:, 0]) < 600:
+        #         self.total_time = self.total_time/10
+        #         total_episodes = int(self.total_time / self.dt)
+        #         self.super_steps = max(1, int(total_episodes / self.horizon))
+        #         self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
+        #         if self.verbose:
+        #             print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
         
-        self.n_episodes = int(self.total_time / (self.dt * self.super_steps))
         # Create solver instances
         self._create_solver_instances()
     
@@ -221,7 +219,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.ref_times.append(current_time)
         
         # Store states at each super-step
-        for episode in range(self.n_episodes):
+        for episode in range(self.horizon):
             for step in range(self.super_steps):
                 current_time += self.dt
                 sim.advance(current_time)
@@ -306,7 +304,7 @@ class IntegratorSwitchingEnv(gym.Env):
     def step(self, action):
         """Execute one super-step with chosen solver"""
         # Check if already reached steady state or max episodes
-        if self.terminated_by_steady_state and (self.reached_steady_state or self.current_episode >= self.n_episodes):
+        if self.terminated_by_steady_state and (self.reached_steady_state or self.current_episode >= self.horizon):
             terminated = True
             obs = self._get_observation(self.current_state)
             info = self._get_info()
@@ -330,23 +328,27 @@ class IntegratorSwitchingEnv(gym.Env):
             reward, success, cpu_time, timestep_error = self._integrate_super_step(action)
         
         # Update episode state
-        self.current_episode += 1
         self.action_history.append(action)
         self.cpu_times.append(cpu_time)
         self.episode_rewards.append(reward)
         
         self._check_steady_state(self.current_state[0])
         # # Check for steady state after integration
-        if self.terminated_by_steady_state or self.count_since_steady_state >= self.termination_count_threshold:
-            print(f"Terminated by steady state or count since steady state >= {self.count_since_steady_state}")
-            terminated = self.reached_steady_state or self.current_episode >= self.n_episodes
+        #print(f"Current episode: {self.current_episode} - horizon: {self.horizon} - super steps: {self.super_steps} - ref length: {len(self.ref_states)} - states_trajectory length: {len(self.states_trajectory)}")
+        if self.current_episode > self.horizon:
+            terminated = True
+        elif self.terminated_by_steady_state or self.count_since_steady_state >= self.termination_count_threshold:
+            #print(f"Terminated by steady state or count since steady state >= {self.count_since_steady_state}")
+            terminated = self.reached_steady_state or self.current_episode >= self.horizon
+            #print(f"Terminated: {terminated}")
         else:
-            terminated = self.current_episode >= self.n_episodes
+            terminated = self.current_episode >= self.horizon
+            #print(f"Terminated: {terminated}")
         if terminated:
+            #print(f"Terminated: {terminated}")
             if hasattr(self.reward_function, 'end_episode_update_lambda'):
                 self.reward_function.end_episode_update_lambda()
      
-        
         obs = self._get_observation(self.current_state)
         self.previous_states.append(self.current_state.copy())
         info = self._get_info()
@@ -361,6 +363,8 @@ class IntegratorSwitchingEnv(gym.Env):
             'ignition_time': self.ignition_time,
             'termination_reason': 'steady_state' if self.reached_steady_state else ('max_episodes' if terminated else 'ongoing'),
         })
+        
+        self.current_episode += 1
         
         return obs, reward, terminated, False, info
     
@@ -406,7 +410,7 @@ class IntegratorSwitchingEnv(gym.Env):
         config = self.solver_configs[action]
         
         start_time = time.time()
-        
+        #print(f"[Integrate super step] Current episode: {self.current_episode} - horizon: {self.horizon} - super steps: {self.super_steps}")
         try:
             # Integrate each timestep individually (like CFD)
             for step in range(self.super_steps):
@@ -433,13 +437,16 @@ class IntegratorSwitchingEnv(gym.Env):
                 if self.track_trajectory:
                     self.times_trajectory.append(self.current_time)
         
-            
+            #print(f"Final step = {step}/{self.super_steps} -  total data so far: {len(self.states_trajectory)}")
             cpu_time = time.time() - start_time
             
             # Calculate timestep error against reference
             ref_idx = (self.current_episode + 1) * self.super_steps
+            # if self.current_episode % 10 == 0:
+            #     print(f"{self.current_episode}: ref_idx: {ref_idx}")
             if ref_idx < len(self.ref_states):
                 timestep_error = self._calculate_error(self.current_state, self.ref_states[ref_idx])
+
             else:
                 timestep_error = 0.0
             
@@ -469,17 +476,30 @@ class IntegratorSwitchingEnv(gym.Env):
         try:
         
             temp_error = np.abs((state)[0] - (ref_state)[0]) / ref_state[0]
-            
+            # if self.current_episode % 10 == 0:
+            #     print(f"{self.current_episode}: Temp error: {temp_error} - state: {state[0]}, ref_state: {ref_state[0]}")
             # Species errors (relative where possible)
             species_errors = []
+            species_error_dict = {}
             for idx in self.representative_species_indices:
-                s  = np.log10(max(1e-12, (state)[idx+1]))
-                sr = np.log10(max(1e-12, (ref_state)[idx+1]))
-                species_error = abs(abs(s - sr) / sr)  # relative with floor
-
+                s  = max(1e-12, (state)[idx+1])
+                sr = max(1e-12, (ref_state)[idx+1])
+                
+                species_error = abs(s - sr) 
+                species_name = self.gas.species_names[idx]
+                # if self.current_episode % 10 == 0:
+                #     print(f"{species_name}: state: {state[idx+1]}, ref_state: {ref_state[idx+1]} - species_error: {species_error}")
+                species_error_dict[species_name] = species_error
                 species_errors.append(species_error)
             
-            #print(f"Species errors mean: {np.mean(species_errors)}, Temp error: {temp_error}, max: {np.max(species_errors)}, min: {np.min(species_errors)}")
+            # # Get top 3 species with highest error
+            # sorted_species = sorted(species_error_dict.items(), key=lambda x: x[1], reverse=True)[:3]
+            # top_species_str = ", ".join([f"{name}: {error:.3f}" for name, error in sorted_species])
+            
+            # if self.current_episode % 10 == 0:
+            #     print(f"{self.current_episode}: Species errors mean: {np.mean(species_errors)}, Temp error: {temp_error}")
+            # print(f"Top 3 species errors: {top_species_str}")
+            
             # Combined error (weighted average)
             total_error = 0.3 * temp_error + 0.7 * np.mean(species_errors)
             
@@ -557,7 +577,7 @@ class IntegratorSwitchingEnv(gym.Env):
         """Get environment info"""
         return {
             'episode': self.current_episode,
-            'total_episodes': self.n_episodes,
+            'total_episodes': self.horizon,
             'current_conditions': {
                 'temperature': self.current_temp,
                 'pressure': self.current_pressure / ct.one_atm,
@@ -698,7 +718,7 @@ if __name__ == "__main__":
         obs, info = env.reset(temperature=T, pressure=P, phi=phi, total_time=total_time, dt=dt, etol=etol)
         from tqdm import tqdm
         
-        pbar = tqdm(total=env.n_episodes, desc=f'Running solver {solver_names[action]}')
+        pbar = tqdm(total=env.horizon, desc=f'Running solver {solver_names[action]}')
         count = 0
         while True:
             obs, reward, terminated, truncated, info = env.step(action)

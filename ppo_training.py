@@ -984,7 +984,7 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
      
             # Reset environment
             obs, info = env.reset(temperature=conditions['temperature'], pressure=conditions['pressure']*ct.one_atm, phi=conditions['phi'], total_time=conditions['total_time'])
-            print(f"Reference Max Temperature: {np.max(env.ref_states[:, 0])}")
+            print(f"Reference Max Temperature: {np.max(env.ref_states[:, 0])} - horizon: {env.horizon} - total_time: {conditions['total_time']}")
             done = False
             
             # Episode data collection
@@ -997,8 +997,7 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
             total_cpu_time = 0
             
             # Create progress bar for episode steps
-            pbar = tqdm(total=env.n_episodes, desc=f"Episode {ep_idx+1}/{n_eval_episodes}")
-            
+            pbar = tqdm(total=env.horizon, desc=f"Episode {ep_idx+1}/{n_eval_episodes}")
             while not done:
                 # Get action (deterministic or stochastic)
                 if deterministic:
@@ -1013,10 +1012,11 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
                 else:
                     action, log_prob, _, value = agent.get_action(obs)
                 
+                
                 # Step environment
                 next_obs, reward, terminated, truncated, next_info = env.step(action)
                 done = terminated or truncated
-                
+           
                 # Collect data
                 
                 total_reward += reward
@@ -1024,16 +1024,19 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
                 
                 # Update progress bar
                 temp = env.current_state[0]
-                ref_temp = env.ref_states[env.current_episode * env.super_steps, 0]
+                ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
+                #print(f"Current episode: {env.current_episode} - horizon: {env.horizon} - ref_temp: {ref_temp} - len(env.ref_states): {len(env.ref_states)}")
                 cpu_time = next_info.get('cpu_time', 0)
                 pbar.set_postfix({
-                    'T': f'{temp:.1f}K | {ref_temp:.1f}K',
+                    'T': f'{temp:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K',
+                    'I': f'{env.current_pressure/ct.one_atm:.1f}bar, φ={env.current_phi:.2f}',
                     'A': action,
                     'C': f'{cpu_time:.3f}s',
-                    'R': f'{reward:.1f}'
+                    'R': f'{reward:.1f}',
+                    'E': f'{env.timestep_errors[-1]:.3f}',
+                    'L': f'{(env.current_episode-1)*env.super_steps}/{len(env.ref_states)}'
                 })
                 pbar.update(1)
-                
                 obs = next_obs
             
             pbar.close()
@@ -1173,7 +1176,7 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
         while steps_collected < rollout_length:
             
             # Episode loop
-            pbar = tqdm(total=env.n_episodes, desc=f"Episode {episode_count}")
+            pbar = tqdm(total=env.horizon, desc=f"Episode {episode_count}")
             while not done and steps_collected < rollout_length:
                 # Get action from agent
                 action, log_prob, value = agent.get_action(obs)
@@ -1201,14 +1204,15 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
                 
                 temp = env.current_state[0]
                 cpu_time = next_info.get('cpu_time', 0)
-                ref_temp = env.ref_states[env.current_episode * env.super_steps, 0]
+                ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
                 pbar.set_postfix({
                 'T': f'{temp:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K', 
-                'P': f'{env.current_pressure/ct.one_atm:.1f}bar',
-                'φ': f'{env.current_phi:.2f}',
+                'I': f'{env.current_pressure/ct.one_atm:.1f}bar | {env.current_phi:.2f}',
                 'A': action, 
                 'R': f'{reward:.1f}', 
-                'C': f'{cpu_time:.3f}'
+                'C': f'{cpu_time:.3f}',
+                'E': f'{env.timestep_errors[-1]:.3f}',
+                'L': f'{(env.current_episode-1)*env.super_steps}/{len(env.ref_states)}'
                 })
                 pbar.update(1)
                         
@@ -1416,7 +1420,7 @@ if __name__ == "__main__":
                        help='Maximum gradient norm')
     
     # parse the policy network architecture
-    parser.add_argument('--policy-network-arch', type=str, default='[256, 128, 64]',
+    parser.add_argument('--policy-network-arch', type=str, default='[128, 128]',
                        help='Policy network architecture')
     
     # Environment configuration
@@ -1432,7 +1436,7 @@ if __name__ == "__main__":
                        help='Timestep range')
     parser.add_argument('--etol', type=float, default=1e-4,
                        help='Error tolerance')
-    parser.add_argument('--super-steps', type=int, default=100,
+    parser.add_argument('--horizon', type=int, default=100,
                        help='Number of super steps per episode')
     
     # Reward function parameters
@@ -1444,9 +1448,9 @@ if __name__ == "__main__":
                        help='Lambda learning rate')
     parser.add_argument('--target-violation', type=float, default=0.0,
                        help='Target violation')
-    parser.add_argument('--cpu-log-delta', type=float, default=1e-2,
+    parser.add_argument('--cpu-log-delta', type=float, default=1e-3,
                        help='CPU log delta')
-    parser.add_argument('--reward-clip', type=float, default=10.0,
+    parser.add_argument('--reward-clip', type=float, default=5.0,
                        help='Reward clip')
     
     # Hardware
@@ -1542,11 +1546,13 @@ if __name__ == "__main__":
         time_range=(1e-3, 1e-1),
         dt_range=(1e-6, 1e-6),
         etol=args.etol,
-        super_steps=args.super_steps,
+        horizon=args.horizon,
         reward_function=reward_function,
         solver_configs=solver_configs,
         verbose=args.verbose,
-        terminated_by_steady_state=False
+        terminated_by_steady_state=False,
+        precompute_reference=True,
+        track_trajectory=True
     )
     
     print(f"Environment created successfully!")
