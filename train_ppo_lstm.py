@@ -125,7 +125,7 @@ def setup_neptune_logging(args):
             "max_grad_norm": args.max_grad_norm,
             "lr": args.lr,
             "epochs": args.epochs,
-            "seq_len": args.seq_len,
+            "seq_len": args.horizon,
             "batch_seqs": args.batch_seqs,
             "target_kl": args.target_kl,
             "rollout_steps": args.rollout_steps,
@@ -335,12 +335,12 @@ def train(args):
     ppo = PPO(policy, PPOConfig(
         clip_coef=args.clip_coef, vf_coef=args.vf_coef, ent_coef=args.ent_coef,
         max_grad_norm=args.max_grad_norm, lr=args.lr, epochs=args.epochs,
-        seq_len=args.seq_len, batch_seqs=args.batch_seqs, target_kl=args.target_kl,
+        seq_len=args.horizon, batch_seqs=args.batch_seqs, target_kl=args.target_kl,
         device=str(device)
     ))
 
-    # shield wrapper for rollouts (kept outside optimizer)
-    shield = ShieldedPolicy(model=policy, device=device, pmin=args.pmin, hold_K=args.hold_K)
+    # # shield wrapper for rollouts (kept outside optimizer)
+    # shield = ShieldedPolicy(model=policy, device=device, pmin=args.pmin, hold_K=args.hold_K)
 
     # obs normalization
     obs_rms = RunningMeanStd(shape=(obs_dim,))
@@ -614,7 +614,6 @@ if __name__ == "__main__":
     ap.add_argument("--max_grad_norm", type=float, default=0.5)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--epochs", type=int, default=4)
-    ap.add_argument("--seq_len", type=int, default=64)
     ap.add_argument("--batch_seqs", type=int, default=16)
     ap.add_argument("--target_kl", type=float, default=0.03)
 
