@@ -410,10 +410,12 @@ class IntegratorSwitchingEnv(gym.Env):
         config = self.solver_configs[action]
         
         start_time = time.time()
+        cpu_times = []
         #print(f"[Integrate super step] Current episode: {self.current_episode} - horizon: {self.horizon} - super steps: {self.super_steps}")
         try:
             # Integrate each timestep individually (like CFD)
             for step in range(self.super_steps):
+                start_time = time.time()
                 if config['type'] == 'cvode':
                     # Reset solver to current state (fresh like each CFD grid point)
                     solver.set_state(self.current_state, 0.0)
@@ -429,6 +431,7 @@ class IntegratorSwitchingEnv(gym.Env):
                         raise RuntimeError(f"QSS integration failed with code {result}")
                     self.current_state = np.array(solver.y)
                 
+                cpu_times.append(time.time() - start_time)
                 # Update gas object with new state for next iteration
                 self.gas.TPY = self.current_state[0], self.current_pressure, self.current_state[1:]
                 if self.track_trajectory:
@@ -436,9 +439,9 @@ class IntegratorSwitchingEnv(gym.Env):
                 self.current_time += self.dt
                 if self.track_trajectory:
                     self.times_trajectory.append(self.current_time)
-        
+                
             #print(f"Final step = {step}/{self.super_steps} -  total data so far: {len(self.states_trajectory)}")
-            cpu_time = time.time() - start_time
+            cpu_time = np.mean(cpu_times)
             
             # Calculate timestep error against reference
             ref_idx = (self.current_episode + 1) * self.super_steps
