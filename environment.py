@@ -20,7 +20,7 @@ class IntegratorSwitchingEnv(gym.Env):
                  reward_function=None,
                  ignition_temp_threshold=1600,  # Temperature threshold for ignition detection
                  steady_temp_tolerance=1.0,     # Temperature change tolerance for steady state
-                 steady_time_factor=0.2,
+                 steady_time_factor=0.1,
                  verbose=False,
                  solver_configs=None,
                  terminated_by_steady_state=False,

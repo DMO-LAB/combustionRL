@@ -31,22 +31,30 @@ class LagrangeReward1:
 
         # Violation: zero if below epsilon; linear above
         violation = max(err / (self.epsilon + 1e-12) - 1.0, 0.0)
+        violation = np.clip(violation, 0, 10)
         #print(f"Violation: {violation} - Error: {err} - Epsilon: {self.epsilon}")
         self._violations.append(violation)
 
 
-        r = log_cpu_term - self.lambda_ * violation
+        r = log_cpu_term - 1 * violation
         
         # if violation is 0 and action is 1 and reached_steady_state is True, add a bonus
         if violation == 0 and action == 1 and reached_steady_state:
             r_bonus = r + 5.0
             #print(f"Good action: {action} and reached_steady_state: {reached_steady_state} - reward: {r} - reward_bonus: {r_bonus} - error: {err:4f} - cpu_time: {cpu_time:4f}")
         elif violation == 0 and reached_steady_state and action == 0:
-            r_bonus = -2*r
+            r_bonus = -r
         else:
             r_bonus = 0.0
-            
+        
+        if reached_steady_state and violation != 0 and action == 1:
+            r -= 2.0
+        
         r += r_bonus
+        
+        # if violation == 0 and action == 0:
+        #     reward -= 0.5
+        
         reward = float(np.clip(r, -self.reward_clip, self.reward_clip))
         return reward
 

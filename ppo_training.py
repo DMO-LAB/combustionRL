@@ -1390,7 +1390,7 @@ if __name__ == "__main__":
                        help='Optional display name for the Neptune run')
     
     # Evaluation arguments
-    parser.add_argument('--eval-freq', type=int, default=500,
+    parser.add_argument('--eval-freq', type=int, default=200,
                        help='Evaluation frequency (episodes)')
     parser.add_argument('--n-eval-episodes', type=int, default=1,
                        help='Number of evaluation episodes per condition set')
@@ -1434,13 +1434,13 @@ if __name__ == "__main__":
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
-    parser.add_argument('--etol', type=float, default=1e-4,
+    parser.add_argument('--etol', type=float, default=1e-2,
                        help='Error tolerance')
     parser.add_argument('--horizon', type=int, default=100,
                        help='Number of super steps per episode')
     
     # Reward function parameters
-    parser.add_argument('--epsilon', type=float, default=1e-4,
+    parser.add_argument('--epsilon', type=float, default=1e-2,
                        help='Error threshold for reward function')
     parser.add_argument('--lambda-init', type=float, default=1.0,
                        help='Lambda initial value')
@@ -1450,7 +1450,7 @@ if __name__ == "__main__":
                        help='Target violation')
     parser.add_argument('--cpu-log-delta', type=float, default=1e-3,
                        help='CPU log delta')
-    parser.add_argument('--reward-clip', type=float, default=5.0,
+    parser.add_argument('--reward-clip', type=float, default=10.0,
                        help='Reward clip')
     
     # Hardware
@@ -1540,7 +1540,7 @@ if __name__ == "__main__":
         mechanism_file=args.mechanism_file,
         fuel=args.fuel,
         oxidizer=args.oxidizer,
-        temp_range=(300, 1100),
+        temp_range=(300, 1200),
         phi_range=(0.5, 2.0),
         pressure_range=(1, 10),
         time_range=(1e-3, 1e-1),
@@ -1552,7 +1552,8 @@ if __name__ == "__main__":
         verbose=args.verbose,
         terminated_by_steady_state=False,
         precompute_reference=True,
-        track_trajectory=True
+        track_trajectory=True,
+        termination_count_threshold=20
     )
     
     print(f"Environment created successfully!")

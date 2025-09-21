@@ -46,7 +46,7 @@ def make_env(args):
         dt_range=(args.dt, args.dt), etol=args.epsilon, 
         horizon=args.horizon,
         verbose=False,
-        termination_count_threshold=10,
+        termination_count_threshold=20,
         reward_function=LagrangeReward1(**reward_cfg),
         precompute_reference=True, track_trajectory=True
     )
@@ -864,7 +864,7 @@ if __name__ == "__main__":
     ap.add_argument("--mechanism", type=str, default="large_mechanism/n-dodecane.yaml")
     ap.add_argument("--fuel", type=str, default="nc12h26")
     ap.add_argument("--oxidizer", type=str, default="O2:0.21, N2:0.79")
-    ap.add_argument("--epsilon", type=float, default=1e-4)
+    ap.add_argument("--epsilon", type=float, default=1e-2)
     ap.add_argument("--horizon", type=int, default=100)
     # IC sampling ranges for training (curriculum-like)
     ap.add_argument("--T_low", type=float, default=600.0)
