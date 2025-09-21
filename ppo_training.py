@@ -1400,7 +1400,7 @@ if __name__ == "__main__":
                        help='Evaluation pressures (bar)')
     parser.add_argument('--eval-phi', nargs=3, type=float, default=[1, 1.66, 1.0],
                        help='Evaluation equivalence ratios')
-    parser.add_argument('--eval-time', nargs=3, type=float, default=[5e-2, 0.005, 2e-2],
+    parser.add_argument('--eval-time', nargs=3, type=float, default=[5e-2, 0.007, 2e-2],
                        help='Evaluation total times (s)')
     
     # PPO hyperparameters

@@ -148,7 +148,7 @@ def setup_neptune_logging(args):
 
 def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: RunningMeanStd, 
                    device: torch.device, args, neptune_run=None, update: int = 0):
-    """Evaluate policy deterministically over fixed test conditions"""
+    """Evaluate policy deterministically over fixed test conditions with detailed data collection"""
     policy.eval()
     
     # Define fixed test conditions for consistent evaluation
@@ -171,7 +171,8 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         'overall_violations': [],
         'overall_errors': [],
         'overall_lengths': [],
-        'overall_action_distribution': {0: 0, 1: 0}
+        'overall_action_distribution': {0: 0, 1: 0},
+        'detailed_episodes': []  # Store detailed episode data for plotting
     }
     
     print(f"[eval] Starting evaluation over {len(test_conditions)} fixed test conditions...")
@@ -200,6 +201,22 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         episode_length = 0
         condition_action_distribution = {0: 0, 1: 0}
         
+        # Detailed episode data collection for plotting
+        episode_data = {
+            'conditions': condition.copy(),
+            'solver_names': env.get_solver_names(),
+            'cpu_times': [],
+            'actions': [],
+            'rewards': [],
+            'timestep_errors': [],
+            'trajectory': [],
+            'temperatures': [],
+            'times': [],
+            'reference_temperatures': [],
+            'reference_times': [],
+            'reference_species': []
+        }
+        
         done = False
         pbar = tqdm(total=args.horizon, desc="Evaluation")
         while not done and episode_length < args.horizon:
@@ -226,6 +243,15 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             condition_action_distribution[action] += 1
             eval_results['overall_action_distribution'][action] += 1
             
+            # Collect detailed episode data
+            episode_data['cpu_times'].append(info.get("cpu_time", 0.0))
+            episode_data['actions'].append(action)
+            episode_data['rewards'].append(reward)
+            episode_data['timestep_errors'].append(info.get("timestep_error", 0.0))
+            episode_data['trajectory'].append(env.current_state.copy())
+            episode_data['temperatures'].append(env.current_state[0])
+            episode_data['times'].append(env.current_time)
+            
             episode_length += 1
             obs = obs_next
             done = terminated or truncated
@@ -238,6 +264,15 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             })
             pbar.update(1)
         pbar.close()
+        
+        # Add reference data
+        episode_data['reference_temperatures'] = env.ref_states[:, 0]
+        episode_data['reference_times'] = env.ref_times
+        episode_data['reference_species'] = env.ref_states[:, 1:]
+        
+        # Store detailed episode data
+        eval_results['detailed_episodes'].append(episode_data)
+        
         # Store condition-specific results
         condition_summary = {
             'reward': episode_reward,
@@ -249,7 +284,8 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             'action_1_ratio': condition_action_distribution[1] / sum(condition_action_distribution.values()) if sum(condition_action_distribution.values()) > 0 else 0.0,
             'temperature': condition["temperature"],
             'pressure': condition["pressure"],
-            'phi': condition["phi"]
+            'phi': condition["phi"],
+            'episode_data': episode_data  # Include detailed data for plotting
         }
         
         eval_results['condition_results'][condition_name] = condition_summary
@@ -273,7 +309,8 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         'mean_episode_length': np.mean(eval_results['overall_lengths']),
         'action_0_ratio': eval_results['overall_action_distribution'][0] / sum(eval_results['overall_action_distribution'].values()) if sum(eval_results['overall_action_distribution'].values()) > 0 else 0.0,
         'action_1_ratio': eval_results['overall_action_distribution'][1] / sum(eval_results['overall_action_distribution'].values()) if sum(eval_results['overall_action_distribution'].values()) > 0 else 0.0,
-        'condition_results': eval_results['condition_results']
+        'condition_results': eval_results['condition_results'],
+        'detailed_episodes': eval_results['detailed_episodes']
     }
     
     print(f"[eval] Update {update} - Overall Mean Reward: {eval_summary['mean_reward']:.3f} ± {eval_summary['std_reward']:.3f}")
@@ -312,6 +349,234 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             neptune_run[f"eval/update_{update}/conditions/{condition_name}/phi"] = condition_data['phi']
     
     return eval_summary, eval_results
+
+def create_evaluation_plots(update: int, eval_results: dict, out_dir: str, neptune_run=None, env=None):
+    """Create evaluation plots for temperature, CPU time, and action trajectories"""
+    
+    if not eval_results or not eval_results.get('detailed_episodes'):
+        print("[eval] No detailed episode data available for plotting")
+        return
+    
+    # Create evaluation plots directory
+    eval_plots_dir = os.path.join(out_dir, "eval_plots")
+    os.makedirs(eval_plots_dir, exist_ok=True)
+    
+    detailed_episodes = eval_results['detailed_episodes']
+    
+    # Create plots for each evaluation condition
+    for i, episode_data in enumerate(detailed_episodes):
+        print(f"[eval] Creating evaluation plots for update {update} - condition {i+1}")
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle(f'Evaluation Update {update} - Condition {i+1}\n'
+                    f'T={episode_data["conditions"]["temperature"]:.0f}K, '
+                    f'P={episode_data["conditions"]["pressure"]:.1f}bar, '
+                    f'φ={episode_data["conditions"]["phi"]:.2f}', fontsize=14)
+        
+        # Extract data
+        times = episode_data['times']
+        temperatures = episode_data['temperatures']
+        cpu_times = episode_data['cpu_times']
+        rewards = episode_data['rewards']
+        actions = episode_data['actions']
+        trajectory = np.array(episode_data['trajectory'])
+        solver_names = episode_data['solver_names']
+        reference_temperatures = episode_data['reference_temperatures']
+        reference_times = episode_data['reference_times']
+        reference_species = episode_data['reference_species']
+        
+        # Plot 1: Temperature profile
+        ax1 = axes[0, 0]
+        ax1.plot(times, temperatures, 'b-', linewidth=2, label='Agent')
+        if reference_temperatures is not None and reference_times is not None:
+            ax1.plot(reference_times, reference_temperatures, 'r--', linewidth=2, label='Reference')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Temperature (K)')
+        ax1.set_title('Temperature Profile')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        # Plot 2: CPU time profile
+        ax2 = axes[0, 1]
+        # Left axis for CPU time
+        ax2.plot(np.arange(len(cpu_times)), cpu_times, 'g-', linewidth=2, label='CPU Time')
+        ax2.set_xlabel('Step')
+        ax2.set_ylabel('CPU Time (s)', color='g')
+        ax2.tick_params(axis='y', labelcolor='g')
+        
+        # Right axis for reward
+        ax2_right = ax2.twinx()
+        ax2_right.plot(np.arange(len(rewards)), rewards, 'r-', linewidth=2, label='Reward')
+        ax2_right.set_ylabel('Reward', color='r')
+        ax2_right.tick_params(axis='y', labelcolor='r')
+        
+        ax2.set_title('CPU Time and Reward Profile')
+        ax2.grid(True, alpha=0.3)
+        
+        # Add both legends
+        lines1, labels1 = ax2.get_legend_handles_labels()
+        lines2, labels2 = ax2_right.get_legend_handles_labels()
+        ax2_right.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+        
+        # Plot 3: Action trajectory
+        ax3 = axes[1, 0]
+        # Create action trajectory plot
+        action_colors = ['red', 'blue', 'green', 'orange', 'purple']
+        for j, action in enumerate(actions):
+            color = action_colors[action % len(action_colors)]
+            ax3.scatter(j, action, c=color, s=20, alpha=0.7)
+        
+        ax3.set_xlabel('Step')
+        ax3.set_ylabel('Solver Action')
+        ax3.set_title('Solver Selection Trajectory')
+        ax3.set_yticks(range(len(solver_names)))
+        ax3.set_yticklabels(solver_names)
+        ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Species profile (CO2, H2O, H2, OH)
+        ax4 = axes[1, 1]
+        species_names = ['CO2', 'H2O', 'H2', 'OH']
+        species_indices = []
+        
+        # Try to find species indices (this might fail if species don't exist)
+        try:
+            gas = ct.Solution(env.mechanism_file)
+            species_indices = [None] * len(species_names)
+            
+            for s in range(len(species_names)):
+                species_indices[s] = gas.species_index(species_names[s])
+            
+            for s in range(len(species_names)):
+                ax4.plot(np.arange(len(times)), trajectory[:, species_indices[s]], label=f'{species_names[s]}')
+                ax4.plot(np.arange(len(reference_times)), reference_species[:, species_indices[s]], label=f'{species_names[s]} Reference', linestyle='--')
+            
+            ax4.set_xlabel('Step')
+            ax4.set_ylabel('Species Concentration')
+            ax4.set_title('Species Profile (Not Available)')
+            ax4.grid(True, alpha=0.3)
+        except Exception as e:
+            ax4.text(0.5, 0.5, f'Species data unavailable\n({str(e)})', 
+                    ha='center', va='center', transform=ax4.transAxes)
+            ax4.set_title('Species Profile (Unavailable)')
+        
+        plt.tight_layout()
+        
+        # Save plot
+        filename = f'evaluation_update_{update}_condition_{i+1}.png'
+        filepath = os.path.join(eval_plots_dir, filename)
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Upload to Neptune
+        if neptune_run:
+            try:
+                neptune_run[f"eval_plots/{filename}"].upload(filepath)
+            except Exception as e:
+                print(f"Warning: Failed to upload {filename} to Neptune: {e}")
+    
+    # Create summary plot for all evaluation conditions
+    create_evaluation_summary_plot(update, eval_results, eval_plots_dir, neptune_run, env)
+
+def create_evaluation_summary_plot(update: int, eval_results: dict, eval_plots_dir: str, neptune_run=None, env=None):
+    """Create summary plot comparing all evaluation conditions"""
+    print(f"[eval] Creating evaluation summary plot for update {update}")
+    
+    detailed_episodes = eval_results['detailed_episodes']
+    if not detailed_episodes:
+        return
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(f'Evaluation Summary - Update {update}', fontsize=16)
+    
+    colors = ['blue', 'red', 'green', 'orange', 'purple']
+    
+    # Plot 1: Temperature profiles comparison
+    ax1 = axes[0, 0]
+    for i, episode_data in enumerate(detailed_episodes):
+        times = episode_data['times']
+        temperatures = episode_data['temperatures']
+        reference_temperatures = episode_data['reference_temperatures']
+        reference_times = episode_data['reference_times']
+        label = f"T={episode_data['conditions']['temperature']:.0f}K, φ={episode_data['conditions']['phi']:.2f}"
+        ax1.plot(times, temperatures, color=colors[i % len(colors)], linewidth=2, label=label)
+        if reference_temperatures is not None and reference_times is not None:
+            ax1.plot(reference_times, reference_temperatures, color='black', linewidth=2, 
+                    label='Reference' if i == 0 else "", linestyle='--')
+    
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Temperature (K)')
+    ax1.set_title('Temperature Profiles Comparison')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Plot 2: CPU time comparison
+    ax2 = axes[0, 1]
+    for i, episode_data in enumerate(detailed_episodes):
+        cpu_times = episode_data['cpu_times']
+        label = f"T={episode_data['conditions']['temperature']:.0f}K, φ={episode_data['conditions']['phi']:.2f}"
+        ax2.plot(np.arange(len(cpu_times)), cpu_times, color=colors[i % len(colors)], linewidth=2, label=label)
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('CPU Time (s)')
+    ax2.set_title('CPU Time Comparison')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # Plot 3: Solver usage comparison
+    ax3 = axes[1, 0]
+    if detailed_episodes:
+        solver_names = detailed_episodes[0]['solver_names']
+        x = np.arange(len(solver_names))
+        width = 0.25
+        
+        for i, episode_data in enumerate(detailed_episodes):
+            actions = episode_data['actions']
+            action_counts = np.bincount(np.array(actions), minlength=len(solver_names))
+            percentages = action_counts / len(actions) * 100
+            ax3.bar(x + i*width, percentages, width, label=f"Condition {i+1}", color=colors[i % len(colors)])
+        
+        ax3.set_xlabel('Solver')
+        ax3.set_ylabel('Usage Percentage (%)')
+        ax3.set_title('Solver Usage Comparison')
+        ax3.set_xticks(x + width)
+        ax3.set_xticklabels(solver_names)
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Performance metrics
+    ax4 = axes[1, 1]
+    condition_results = eval_results['condition_results']
+    condition_names = list(condition_results.keys())
+    
+    rewards = [condition_results[name]['reward'] for name in condition_names]
+    cpu_times = [condition_results[name]['mean_cpu_time'] for name in condition_names]
+    lengths = [condition_results[name]['episode_length'] for name in condition_names]
+    
+    x_pos = np.arange(len(condition_names))
+    width = 0.25
+    
+    ax4.bar(x_pos - width, rewards, width, label='Reward', color='blue', alpha=0.7)
+    ax4.bar(x_pos, cpu_times, width, label='CPU Time', color='red', alpha=0.7)
+    ax4.bar(x_pos + width, lengths, width, label='Length', color='green', alpha=0.7)
+    
+    ax4.set_xlabel('Condition')
+    ax4.set_ylabel('Value')
+    ax4.set_title('Performance Metrics')
+    ax4.set_xticks(x_pos)
+    ax4.set_xticklabels([f"C{i+1}" for i in range(len(condition_names))])
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    filename = f'evaluation_summary_update_{update}.png'
+    filepath = os.path.join(eval_plots_dir, filename)
+    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Upload to Neptune
+    if neptune_run:
+        try:
+            neptune_run[f"eval_plots/{filename}"].upload(filepath)
+        except Exception as e:
+            print(f"Warning: Failed to upload {filename} to Neptune: {e}")
 
 # ----------------------------- Training loop -----------------------------
 def train(args):
@@ -500,10 +765,14 @@ def train(args):
 
 
         # ----------------- evaluation -----------------
-        if update % args.eval_interval == 0:
+        if update-1 % args.eval_interval == 0:
             eval_summary, eval_results = evaluate_policy(
                 policy, env, obs_rms, device, args, neptune_run, update
             )
+            
+            # Create evaluation plots
+            print(f"[eval] Creating evaluation plots for update {update}")
+            create_evaluation_plots(update, eval_results, args.out_dir, neptune_run)
             
             # Save evaluation results to CSV
             eval_csv_path = os.path.join(args.out_dir, "eval_log.csv")
@@ -567,6 +836,10 @@ def train(args):
     final_eval_summary, final_eval_results = evaluate_policy(
         policy, env, obs_rms, device, args, neptune_run, args.total_updates
     )
+    
+    # Create final evaluation plots
+    print("[eval] Creating final evaluation plots...")
+    create_evaluation_plots(args.total_updates, final_eval_results, args.out_dir, neptune_run, env)
    
     # Log final model artifacts to Neptune
     if neptune_run:
@@ -591,7 +864,7 @@ if __name__ == "__main__":
     ap.add_argument("--mechanism", type=str, default="large_mechanism/n-dodecane.yaml")
     ap.add_argument("--fuel", type=str, default="nc12h26")
     ap.add_argument("--oxidizer", type=str, default="O2:0.21, N2:0.79")
-    ap.add_argument("--epsilon", type=float, default=1e-3)
+    ap.add_argument("--epsilon", type=float, default=1e-4)
     ap.add_argument("--horizon", type=int, default=100)
     # IC sampling ranges for training (curriculum-like)
     ap.add_argument("--T_low", type=float, default=600.0)
@@ -601,7 +874,7 @@ if __name__ == "__main__":
     ap.add_argument("--P_low", type=float, default=1.0)
     ap.add_argument("--P_high", type=float, default=10.0)
     ap.add_argument("--time_low", type=float, default=1e-3)
-    ap.add_argument("--time_high", type=float, default=5e-2)
+    ap.add_argument("--time_high", type=float, default=1e-2)
     ap.add_argument("--dt", type=float, default=1e-6)
 
     # PPO/LSTM
@@ -618,7 +891,7 @@ if __name__ == "__main__":
     ap.add_argument("--target_kl", type=float, default=0.03)
 
     # rollouts & training schedule
-    ap.add_argument("--rollout_steps", type=int, default=4096)
+    ap.add_argument("--rollout_steps", type=int, default=2048)
     ap.add_argument("--total_updates", type=int, default=300)
     ap.add_argument("--plot_every", type=int, default=5)
     ap.add_argument("--ckpt_every", type=int, default=25)
@@ -635,14 +908,14 @@ if __name__ == "__main__":
     ap.add_argument("--eval_interval", type=int, default=10, help="Evaluate every N updates")
     ap.add_argument("--eval_episodes", type=int, default=20, help="Number of episodes for evaluation (deprecated - now uses fixed conditions)")
     ap.add_argument("--max_eval_steps", type=int, default=200, help="Maximum steps per evaluation episode")
-    ap.add_argument("--eval_time", type=float, default=1e-1, help="Fixed evaluation time for all test conditions")
+    ap.add_argument("--eval_time", type=float, default=7e-2, help="Fixed evaluation time for all test conditions")
     
     # Fixed evaluation conditions (lists of temperatures, pressures, and phis)
-    ap.add_argument("--eval_temperatures", type=float, nargs='+', default=[650.0, 1000.0, 1100.0], 
+    ap.add_argument("--eval_temperatures", type=float, nargs='+', default=[650, 700, 1100], 
                    help="List of temperatures for evaluation (e.g., --eval_temperatures 800 1000 1200)")
-    ap.add_argument("--eval_pressures", type=float, nargs='+', default=[5.0, 10.0, 1.0], 
+    ap.add_argument("--eval_pressures", type=float, nargs='+', default=[3.0, 10.0, 1.0], 
                    help="List of pressures (bar) for evaluation (e.g., --eval_pressures 1.0 3.0 5.0)")
-    ap.add_argument("--eval_phis", type=float, nargs='+', default=[1, 1, 1.2], 
+    ap.add_argument("--eval_phis", type=float, nargs='+', default=[1, 1.66, 1.0], 
                    help="List of phi values for evaluation (e.g., --eval_phis 0.8 1.0 1.2)")
 
     # misc

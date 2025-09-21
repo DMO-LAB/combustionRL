@@ -336,7 +336,7 @@ class IntegratorSwitchingEnv(gym.Env):
         #print(f"Current episode: {self.current_episode} - horizon: {self.horizon} - super steps: {self.super_steps} - ref length: {len(self.ref_states)} - states_trajectory length: {len(self.states_trajectory)}")
         if self.current_episode > self.horizon:
             terminated = True
-        elif self.terminated_by_steady_state or self.count_since_steady_state >= self.termination_count_threshold:
+        if self.terminated_by_steady_state or self.count_since_steady_state >= self.termination_count_threshold:
             #print(f"Terminated by steady state or count since steady state >= {self.count_since_steady_state}")
             terminated = self.reached_steady_state or self.current_episode >= self.horizon
             #print(f"Terminated: {terminated}")
