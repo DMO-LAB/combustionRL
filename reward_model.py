@@ -24,21 +24,25 @@ class LagrangeReward1:
 
     def step_reward(self, cpu_time, err, action=None, reached_steady_state=False):
         # CPU term: larger when faster; use log for smoothness and scale
-        cpu_term = -np.log(cpu_time + self.cpu_log_delta)
+	
+        log_cpu_term = -np.log10(cpu_time + 1e-8)
+        
+        #print(f"Action {action} - cpu time {cpu_time} - log {log_cpu_term} - Lambda: {self.lambda_}")
 
         # Violation: zero if below epsilon; linear above
         violation = max(err / (self.epsilon + 1e-12) - 1.0, 0.0)
         #print(f"Violation: {violation} - Error: {err} - Epsilon: {self.epsilon}")
         self._violations.append(violation)
 
-        r = cpu_term - self.lambda_ * violation
+
+        r = log_cpu_term - self.lambda_ * violation
         
         # if violation is 0 and action is 1 and reached_steady_state is True, add a bonus
         if violation == 0 and action == 1 and reached_steady_state:
             r_bonus = r
             #print(f"Good action: {action} and reached_steady_state: {reached_steady_state} - reward: {r} - reward_bonus: {r_bonus} - error: {err:4f} - cpu_time: {cpu_time:4f}")
         elif violation == 0 and reached_steady_state and action == 0:
-            r_bonus = -r
+            r_bonus = -2*r
         else:
             r_bonus = 0.0
             

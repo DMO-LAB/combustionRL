@@ -156,7 +156,7 @@ class IntegratorSwitchingEnv(gym.Env):
         
         total_episodes = int(self.total_time / self.dt)
         self.super_steps = max(1, int(total_episodes / self.horizon))
-        print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps} - horizon: {self.horizon} - total_time: {self.total_time}")
+        #print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps} - horizon: {self.horizon} - total_time: {self.total_time}")
         # self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
         if self.verbose:
             print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps}")
@@ -187,15 +187,14 @@ class IntegratorSwitchingEnv(gym.Env):
         if self.precompute_reference:
             self._compute_reference_trajectory()
         
-        # # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
-        # if self.precompute_reference:
-        #     if np.max(self.ref_states[:, 0]) < 600:
-        #         self.total_time = self.total_time/10
-        #         total_episodes = int(self.total_time / self.dt)
-        #         self.super_steps = max(1, int(total_episodes / self.horizon))
-        #         self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
-        #         if self.verbose:
-        #             print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
+        # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
+        if self.precompute_reference:
+            if np.max(self.ref_states[:, 0]) < 600:
+                self.total_time = self.total_time/10
+                total_episodes = int(self.total_time / self.dt)
+                self.super_steps = max(1, int(total_episodes / self.horizon))
+                if self.verbose:
+                    print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
         
         # Create solver instances
         self._create_solver_instances()

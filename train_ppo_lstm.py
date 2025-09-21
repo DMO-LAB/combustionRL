@@ -37,7 +37,7 @@ plt.rcParams.update({
 # ----------------------------- Utilities -----------------------------
 def make_env(args):
     reward_cfg = dict(epsilon=args.epsilon, lambda_init=1.0, lambda_lr=0.05,
-                      target_violation=0.0, cpu_log_delta=1e-3, reward_clip=5.0)
+                      target_violation=0.0, cpu_log_delta=1e-3, reward_clip=10.0)
     env = IntegratorSwitchingEnv(
         mechanism_file=args.mechanism, fuel=args.fuel, oxidizer=args.oxidizer,
         temp_range=(args.T_low, args.T_high), phi_range=(args.phi_low, args.phi_high),
@@ -201,8 +201,8 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         condition_action_distribution = {0: 0, 1: 0}
         
         done = False
-        pbar = tqdm(total=args.max_eval_steps, desc="Evaluation")
-        while not done and episode_length < args.max_eval_steps:
+        pbar = tqdm(total=args.horizon, desc="Evaluation")
+        while not done and episode_length < args.horizon:
             # Normalize observation
             obs_n = obs_rms.normalize(obs)
             
@@ -229,7 +229,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             episode_length += 1
             obs = obs_next
             done = terminated or truncated
-            ref_temp = env.ref_states[env.current_episode * env.super_steps, 0]
+            ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
             pbar.set_postfix({
                 'T': f'{env.current_state[0]:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K',
                 'A': action,
@@ -500,7 +500,7 @@ def train(args):
 
 
         # ----------------- evaluation -----------------
-        if update-1 % args.eval_interval == 0:
+        if update % args.eval_interval == 0:
             eval_summary, eval_results = evaluate_policy(
                 policy, env, obs_rms, device, args, neptune_run, update
             )
