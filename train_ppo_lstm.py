@@ -46,7 +46,7 @@ def make_env(args):
         dt_range=(args.dt, args.dt), etol=args.epsilon, 
         horizon=args.horizon,
         verbose=False,
-        termination_count_threshold=100,
+        termination_count_threshold=10,
         reward_function=LagrangeReward1(**reward_cfg),
         precompute_reference=True, track_trajectory=True
     )
@@ -177,7 +177,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
     
     print(f"[eval] Starting evaluation over {len(test_conditions)} fixed test conditions...")
     
-    for condition in test_conditions:
+    for condition in test_conditions[0:1]:
         condition_name = condition["name"]
         print(f"[eval] Testing condition: {condition_name}")
         
@@ -204,17 +204,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         # Detailed episode data collection for plotting
         episode_data = {
             'conditions': condition.copy(),
-            'solver_names': env.get_solver_names(),
-            'cpu_times': [],
-            'actions': [],
-            'rewards': [],
-            'timestep_errors': [],
-            'trajectory': [],
-            'temperatures': [],
-            'times': [],
-            'reference_temperatures': [],
-            'reference_times': [],
-            'reference_species': []
+            'solver_names': env.get_solver_names()
         }
         
         done = False
@@ -243,14 +233,14 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             condition_action_distribution[action] += 1
             eval_results['overall_action_distribution'][action] += 1
             
-            # Collect detailed episode data
-            episode_data['cpu_times'].append(info.get("cpu_time", 0.0))
-            episode_data['actions'].append(action)
-            episode_data['rewards'].append(reward)
-            episode_data['timestep_errors'].append(info.get("timestep_error", 0.0))
-            episode_data['trajectory'].append(env.current_state.copy())
-            episode_data['temperatures'].append(env.current_state[0])
-            episode_data['times'].append(env.current_time)
+            # # Collect detailed episode data
+            # episode_data['cpu_times'].append(info.get("cpu_time", 0.0))
+            # episode_data['actions'].append(action)
+            # episode_data['rewards'].append(reward)
+            # episode_data['timestep_errors'].append(info.get("timestep_error", 0.0))
+            # episode_data['trajectory'].append(env.current_state.copy())
+            # episode_data['temperatures'].append(env.current_state[0])
+            # episode_data['times'].append(env.current_time)
             
             episode_length += 1
             obs = obs_next
@@ -269,6 +259,13 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         episode_data['reference_temperatures'] = env.ref_states[:, 0]
         episode_data['reference_times'] = env.ref_times
         episode_data['reference_species'] = env.ref_states[:, 1:]
+        episode_data['cpu_times'] = env.cpu_times
+        episode_data['actions'] = env.action_history
+        episode_data['rewards'] = env.episode_rewards
+        episode_data['timestep_errors'] = env.timestep_errors
+        episode_data['trajectory'] = np.array(env.states_trajectory)
+        episode_data['temperatures'] = np.array(env.states_trajectory)[:, 0]
+        episode_data['times'] = env.times_trajectory
         
         # Store detailed episode data
         eval_results['detailed_episodes'].append(episode_data)
@@ -388,7 +385,7 @@ def create_evaluation_plots(update: int, eval_results: dict, out_dir: str, neptu
         ax1 = axes[0, 0]
         ax1.plot(times, temperatures, 'b-', linewidth=2, label='Agent')
         if reference_temperatures is not None and reference_times is not None:
-            ax1.plot(reference_times, reference_temperatures, 'r--', linewidth=2, label='Reference')
+            ax1.plot(reference_times[:len(times)], reference_temperatures[:len(times)], 'r--', linewidth=2, label='Reference')
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Temperature (K)')
         ax1.set_title('Temperature Profile')
@@ -443,20 +440,23 @@ def create_evaluation_plots(update: int, eval_results: dict, out_dir: str, neptu
             species_indices = [None] * len(species_names)
             
             for s in range(len(species_names)):
-                species_indices[s] = gas.species_index(species_names[s])
+                species_indices[s] = gas.species_index(species_names[s]) 
             
             for s in range(len(species_names)):
-                ax4.plot(np.arange(len(times)), trajectory[:, species_indices[s]], label=f'{species_names[s]}')
-                ax4.plot(np.arange(len(reference_times)), reference_species[:, species_indices[s]], label=f'{species_names[s]} Reference', linestyle='--')
+                ax4.plot(np.arange(len(times)), trajectory[:, species_indices[s]+1], label=f'{species_names[s]}')
+                ax4.plot(np.arange(len(reference_times[:len(times)])), reference_species[:len(times), species_indices[s]], label=f'{species_names[s]} Reference', linestyle='--')
             
             ax4.set_xlabel('Step')
             ax4.set_ylabel('Species Concentration')
-            ax4.set_title('Species Profile (Not Available)')
+            ax4.set_title('Species Profile')
+            ax4.legend()
             ax4.grid(True, alpha=0.3)
         except Exception as e:
+            print(f"Warning: Failed to plot species data: {e}")
             ax4.text(0.5, 0.5, f'Species data unavailable\n({str(e)})', 
                     ha='center', va='center', transform=ax4.transAxes)
-            ax4.set_title('Species Profile (Unavailable)')
+            ax4.set_title('Species Profile')
+            ax4.legend()
         
         plt.tight_layout()
         
@@ -499,7 +499,7 @@ def create_evaluation_summary_plot(update: int, eval_results: dict, eval_plots_d
         label = f"T={episode_data['conditions']['temperature']:.0f}K, φ={episode_data['conditions']['phi']:.2f}"
         ax1.plot(times, temperatures, color=colors[i % len(colors)], linewidth=2, label=label)
         if reference_temperatures is not None and reference_times is not None:
-            ax1.plot(reference_times, reference_temperatures, color='black', linewidth=2, 
+            ax1.plot(reference_times[:len(times)], reference_temperatures[:len(times)], color='black', linewidth=2, 
                     label='Reference' if i == 0 else "", linestyle='--')
     
     ax1.set_xlabel('Time (s)')
@@ -765,14 +765,14 @@ def train(args):
 
 
         # ----------------- evaluation -----------------
-        if update-1 % args.eval_interval == 0:
+        if update % args.eval_interval == 0:
             eval_summary, eval_results = evaluate_policy(
                 policy, env, obs_rms, device, args, neptune_run, update
             )
             
             # Create evaluation plots
             print(f"[eval] Creating evaluation plots for update {update}")
-            create_evaluation_plots(update, eval_results, args.out_dir, neptune_run)
+            create_evaluation_plots(update, eval_results, args.out_dir, neptune_run, env)
             
             # Save evaluation results to CSV
             eval_csv_path = os.path.join(args.out_dir, "eval_log.csv")

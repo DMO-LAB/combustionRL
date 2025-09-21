@@ -39,7 +39,7 @@ class LagrangeReward1:
         
         # if violation is 0 and action is 1 and reached_steady_state is True, add a bonus
         if violation == 0 and action == 1 and reached_steady_state:
-            r_bonus = r
+            r_bonus = r + 5.0
             #print(f"Good action: {action} and reached_steady_state: {reached_steady_state} - reward: {r} - reward_bonus: {r_bonus} - error: {err:4f} - cpu_time: {cpu_time:4f}")
         elif violation == 0 and reached_steady_state and action == 0:
             r_bonus = -2*r
