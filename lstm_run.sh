@@ -1,10 +1,9 @@
 #!/bin/bash
 #SBATCH -N 1                    # request one node
 #SBATCH -n 1
-#SBATCH --cpus-per-task=32     # specify 32 CPUs
 #SBATCH -t 15:00:00
 #SBATCH -p single
-#SBATCH -A hpc_llm_mech
+#SBATCH -A hpc_les_gt
 #SBATCH -o slurm-%j.out-%N     # stdout file
 #SBATCH -e slurm-%j.err-%N     # stderr file
 # below are job commands
@@ -30,4 +29,3 @@ python train_ppo_lstm.py \
     --eval_phis 1 1.66 1.0 \
     --out_dir ppo_runs/run_lstm \
     2>&1 | tee run_lstm.log
-
