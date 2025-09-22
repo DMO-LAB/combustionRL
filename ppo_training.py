@@ -15,7 +15,6 @@ import json
 import os
 import time
 from datetime import datetime
-import matplotlib.pyplot as plt
 import pandas as pd
 from collections import deque, defaultdict
 import pickle
@@ -30,6 +29,11 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 import ast
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 
 
 NEPTUNE_PROJECT = os.getenv("NEPTUNE_PROJECT")
