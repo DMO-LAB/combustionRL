@@ -16,7 +16,7 @@ class IntegratorSwitchingEnv(gym.Env):
                  temp_range=(1000, 1400), phi_range=(0.5, 2.0),
                  pressure_range=(1, 60), time_range=(1e-3, 1e-2),
                  dt_range=(1e-6, 1e-4),
-                 dt=1e-6, etol=1e-3, super_steps=50,
+                 dt=1e-6, etol=1e-3, super_steps=100,
                  reward_function=None,
                  ignition_temp_threshold=1600,  # Temperature threshold for ignition detection
                  steady_temp_tolerance=1.0,     # Temperature change tolerance for steady state
@@ -27,7 +27,7 @@ class IntegratorSwitchingEnv(gym.Env):
                  termination_count_threshold=50,
                  precompute_reference=False,
                  track_trajectory=False,
-                 horizon=100):       # Time factor for steady state check
+                 horizon=100,):       # Time factor for steady state check
         
         super().__init__()
 
@@ -42,7 +42,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.time_range = time_range
         self.dt = dt
         self.dt_range = dt_range
-        # self.super_steps = super_steps
+        self.super_steps = super_steps
         self.etol = etol
         self.verbose = verbose
         # Steady state detection parameters
@@ -74,7 +74,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.action_space = spaces.Discrete(len(self.solver_configs))
         
         self.key_species = ['O','H','OH','H2O','O2','H2','H2O2','N2']  # fix typo & duplicates
-        obs_size = 2 + len(self.key_species)  # base (T + species + pressure)
+        obs_size = 2 + len(self.key_species) + 1 # base (T + species + pressure)
         self.observation_space = spaces.Box(low=-50., high=50., shape=(2*obs_size,), dtype=np.float32)
 
         self.representative_species = ['ch4', 'o2', 'h2o', 'co2', 'oh'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2', 'oh']
@@ -155,9 +155,12 @@ class IntegratorSwitchingEnv(gym.Env):
                              self.etol)
         
         total_episodes = int(self.total_time / self.dt)
-        self.super_steps = max(1, int(total_episodes / self.horizon))
-        #print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps} - horizon: {self.horizon} - total_time: {self.total_time}")
-        # self.reward_function.cpu_log_delta = 1e-3 * (self.super_steps/50)
+
+        self.super_steps = kwargs.get('super_steps', self.super_steps)  # FIXED across episodes
+
+        # derived
+        ΔT_dec = self.super_steps * self.dt
+        self.horizon = int(np.ceil(self.total_time / ΔT_dec))
         if self.verbose:
             print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps}")
         
@@ -191,8 +194,7 @@ class IntegratorSwitchingEnv(gym.Env):
         if self.precompute_reference:
             if np.max(self.ref_states[:, 0]) < 600:
                 self.total_time = self.total_time/10
-                total_episodes = int(self.total_time / self.dt)
-                self.super_steps = max(1, int(total_episodes / self.horizon))
+                self.horizon = int(np.ceil(self.total_time / ΔT_dec))                
                 if self.verbose:
                     print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
         
@@ -231,7 +233,7 @@ class IntegratorSwitchingEnv(gym.Env):
             print(f"Max reference temperature: {np.max(self.ref_states[:, 0])}")
     
     def _get_observation(self, state):
-        """Convert state to observation with trend features."""
+        """Convert state to observation with trend features + time-left."""
         temp = state[0]
         species = state[1:]
 
@@ -244,15 +246,21 @@ class IntegratorSwitchingEnv(gym.Env):
             except ValueError:
                 key_vals.append(0.0)
 
+        # Base features
         temp_norm = (temp - 300.0) / 2000.0
         species_log = np.log10(np.maximum(key_vals, 1e-20))
         pressure_log = np.log10(self.current_pressure / ct.one_atm)
 
-        # base obs: [T_norm, logY(key species...), logP]
-        base_obs = np.hstack([temp_norm, species_log, pressure_log]).astype(np.float32)
+        # New: normalized time-left in the episode (clipped to [0, 1])
+        time_left = max(0.0, self.total_time - self.current_time)
+        # add tiny denom so division is always defined
+        time_left_norm = np.clip(time_left / (self.total_time + 1e-12), 0.0, 1.0)
 
-        # --- trend features (delta over last obs) ---
-        if self.last_obs is None:
+        # base obs: [T_norm, logY(key species...), logP, time_left_norm]
+        base_obs = np.hstack([temp_norm, species_log, pressure_log, time_left_norm]).astype(np.float32)
+
+        # Trend features (delta over last base_obs)
+        if getattr(self, "last_obs", None) is None:
             trend = np.zeros_like(base_obs, dtype=np.float32)
         else:
             trend = base_obs - self.last_obs
@@ -260,6 +268,7 @@ class IntegratorSwitchingEnv(gym.Env):
         obs = np.hstack([base_obs, trend]).astype(np.float32)
         self.last_obs = base_obs.copy()
         return obs
+
     
     def reset(self, seed=None, options=None, use_initial_state=False, **kwargs):
         """Reset environment for new episode"""
@@ -301,8 +310,8 @@ class IntegratorSwitchingEnv(gym.Env):
         return obs, info
     
     def step(self, action):
-        """Execute one super-step with chosen solver"""
-        # Check if already reached steady state or max episodes
+        """Execute one decision interval (super-step block) with chosen solver."""
+        # If we already reached a terminal condition, just emit a terminal transition
         if self.terminated_by_steady_state and (self.reached_steady_state or self.current_episode >= self.horizon):
             terminated = True
             obs = self._get_observation(self.current_state)
@@ -314,40 +323,38 @@ class IntegratorSwitchingEnv(gym.Env):
                 'ignition_time': self.ignition_time,
             })
             return obs, 0.0, terminated, False, info
-    
+
         # Validate action
         if action >= len(self.solvers) or self.solvers[action] is None:
-            # Invalid solver, give penalty
             reward = -5.0
             success = False
             cpu_time = 0.0
             timestep_error = float('inf')
         else:
-            # Execute integration with chosen solver
+            # Integrate one decision interval (super_steps * dt)
             reward, success, cpu_time, timestep_error = self._integrate_super_step(action)
-        
-        # Update episode state
+
+        # Book-keeping
         self.action_history.append(action)
         self.cpu_times.append(cpu_time)
         self.episode_rewards.append(reward)
-        
+
+        # Check steady state on updated state
         self._check_steady_state(self.current_state[0])
-        # # Check for steady state after integration
-        #print(f"Current episode: {self.current_episode} - horizon: {self.horizon} - super steps: {self.super_steps} - ref length: {len(self.ref_states)} - states_trajectory length: {len(self.states_trajectory)}")
-        if self.current_episode > self.horizon:
-            terminated = True
-        if self.terminated_by_steady_state or self.count_since_steady_state >= self.termination_count_threshold:
-            #print(f"Terminated by steady state or count since steady state >= {self.count_since_steady_state}")
-            terminated = self.reached_steady_state or self.current_episode >= self.horizon
-            #print(f"Terminated: {terminated}")
-        else:
-            terminated = self.current_episode >= self.horizon
-            #print(f"Terminated: {terminated}")
-        if terminated:
-            #print(f"Terminated: {terminated}")
-            if hasattr(self.reward_function, 'end_episode_update_lambda'):
-                self.reward_function.end_episode_update_lambda()
-     
+        if self.reached_steady_state:
+            self.count_since_steady_state += 1
+        # Termination conditions (clean and minimal)
+        terminated = (
+            (self.current_time >= self.total_time) or
+            (self.terminated_by_steady_state and self.reached_steady_state) or
+            (self.count_since_steady_state >= self.termination_count_threshold) or
+            (self.current_episode + 1 >= self.horizon)   # +1 because we’re about to increment
+        )
+
+        if terminated and hasattr(self.reward_function, 'end_episode_update_lambda'):
+            self.reward_function.end_episode_update_lambda()
+
+        # Build obs/info for the transition
         obs = self._get_observation(self.current_state)
         self.previous_states.append(self.current_state.copy())
         info = self._get_info()
@@ -360,12 +367,19 @@ class IntegratorSwitchingEnv(gym.Env):
             'reached_steady_state': self.reached_steady_state,
             'ignition_detected': self.ignition_detected,
             'ignition_time': self.ignition_time,
-            'termination_reason': 'steady_state' if self.reached_steady_state else ('max_episodes' if terminated else 'ongoing'),
+            'termination_reason': (
+                'steady_state' if (self.terminated_by_steady_state and self.reached_steady_state)
+                else ('time_exhausted' if self.current_time >= self.total_time
+                    else ('max_episodes' if (self.current_episode + 1 >= self.horizon)
+                            else ('steady_count' if self.count_since_steady_state >= self.termination_count_threshold
+                                else 'ongoing')))
+            ),
         })
-        
+
+        # One env step done
         self.current_episode += 1
-        
         return obs, reward, terminated, False, info
+
     
     def _check_steady_state(self, current_temp):
         """Check for steady state conditions based on temperature"""
@@ -394,7 +408,6 @@ class IntegratorSwitchingEnv(gym.Env):
             # Check steady state condition
             if temp_stable and temp_high and sufficient_time:
                 self.reached_steady_state = True
-                self.count_since_steady_state += 1
                 if self.verbose:
                     print(f"Steady state reached at T={current_temp:.1f}K, t={self.current_time:.6f}s")
                     print(f"  Temperature change: {temp_change:.3f}K")
@@ -530,10 +543,6 @@ class IntegratorSwitchingEnv(gym.Env):
         return solver, gas_tmp
 
     def _obs_from_arbitrary_state(self, state, set_last_obs=False):
-        """
-        Compute observation (with your trend features if you added them) from an arbitrary state
-        WITHOUT mutating the live env's state/time. Useful to build ref-anchored training samples.
-        """
         # snapshot live
         live_TPY = (self.gas.T, self.current_pressure, self.gas.Y.copy())
         live_last_obs = None if not hasattr(self, 'last_obs') else (None if self.last_obs is None else self.last_obs.copy())
@@ -541,7 +550,7 @@ class IntegratorSwitchingEnv(gym.Env):
         # temporarily set gas to 'state'
         self.gas.TPY = state[0], self.current_pressure, state[1:]
 
-        # build base obs like in _get_observation
+        # base features (match _get_observation)
         temp = state[0]
         key_vals = []
         for spec in self.key_species:
@@ -553,9 +562,12 @@ class IntegratorSwitchingEnv(gym.Env):
         temp_norm = (temp - 300.0) / 2000.0
         species_log = np.log10(np.maximum(key_vals, 1e-20))
         pressure_log = np.log10(self.current_pressure / ct.one_atm)
-        base_obs = np.hstack([temp_norm, species_log, pressure_log]).astype(np.float32)
 
-        # trend features if present
+        time_left = max(0.0, self.total_time - self.current_time)
+        time_left_norm = np.clip(time_left / (self.total_time + 1e-12), 0.0, 1.0)
+
+        base_obs = np.hstack([temp_norm, species_log, pressure_log, time_left_norm]).astype(np.float32)
+
         if hasattr(self, 'last_obs'):
             if self.last_obs is None:
                 trend = np.zeros_like(base_obs, dtype=np.float32)
@@ -567,12 +579,12 @@ class IntegratorSwitchingEnv(gym.Env):
         else:
             obs = base_obs
 
-        # restore live
+        # restore
         self.gas.TPY = live_TPY[0], live_TPY[1], live_TPY[2]
         if hasattr(self, 'last_obs'):
             self.last_obs = live_last_obs
-
         return obs
+
 
     
     def _get_info(self):

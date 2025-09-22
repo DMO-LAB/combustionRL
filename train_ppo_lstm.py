@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 import neptune
 from neptune.types import File
 from environment import IntegratorSwitchingEnv
-from reward_model import LagrangeReward1
+from reward_model import LagrangeReward1, ConstrainedReward
 from ppo_lstm_core import RunningMeanStd, BufferConfig, RolloutBufferRecurrent, PolicyLSTM, PPO, PPOConfig
 from shielded_policy import SwitcherMLP, ShieldedPolicy
 
@@ -37,17 +37,20 @@ plt.rcParams.update({
 # ----------------------------- Utilities -----------------------------
 def make_env(args):
     reward_cfg = dict(epsilon=args.epsilon, lambda_init=1.0, lambda_lr=0.05,
-                      target_violation=0.0, cpu_log_delta=1e-3, reward_clip=10.0)
+                      target_violation=0.0, cpu_log_delta=1e-3, reward_clip=10.0,
+                      cpu_time_baseline=0.005, soft_margin_decades=0.15, switch_penalty=0.02,
+                      ema_alpha=0.3, lambda_max=1e4)
+                      
     env = IntegratorSwitchingEnv(
         mechanism_file=args.mechanism, fuel=args.fuel, oxidizer=args.oxidizer,
         temp_range=(args.T_low, args.T_high), phi_range=(args.phi_low, args.phi_high),
         pressure_range=(int(args.P_low), int(args.P_high)),
         time_range=(args.time_low, args.time_high),
         dt_range=(args.dt, args.dt), etol=args.epsilon, 
-        horizon=args.horizon,
+        super_steps=args.super_steps,
         verbose=False,
         termination_count_threshold=20,
-        reward_function=LagrangeReward1(**reward_cfg),
+        reward_function=ConstrainedReward(**reward_cfg),
         precompute_reference=True, track_trajectory=True
     )
     env.solver_configs = [
@@ -125,7 +128,7 @@ def setup_neptune_logging(args):
             "max_grad_norm": args.max_grad_norm,
             "lr": args.lr,
             "epochs": args.epochs,
-            "seq_len": args.horizon,
+            "seq_len": args.seq_len,
             "batch_seqs": args.batch_seqs,
             "target_kl": args.target_kl,
             "rollout_steps": args.rollout_steps,
@@ -177,7 +180,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
     
     print(f"[eval] Starting evaluation over {len(test_conditions)} fixed test conditions...")
     
-    for condition in test_conditions[0:1]:
+    for condition in test_conditions:
         condition_name = condition["name"]
         print(f"[eval] Testing condition: {condition_name}")
         
@@ -208,19 +211,21 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
         }
         
         done = False
-        pbar = tqdm(total=args.horizon, desc="Evaluation")
-        while not done and episode_length < args.horizon:
+        pbar = tqdm(total=env.horizon, desc="Evaluation")
+        while not done and episode_length < env.horizon:
             # Normalize observation
             obs_n = obs_rms.normalize(obs)
             
             # Get deterministic action (argmax of policy output)
             with torch.no_grad():
-                logits, values, _ = policy(
-                    torch.from_numpy(obs_n).to(device).unsqueeze(0).unsqueeze(0).float(),
+                obs_tensor = torch.FloatTensor(obs_n).unsqueeze(0).to(device)
+                logits, values, (hx, cx) = policy(
+                    obs_tensor,
                     hx.unsqueeze(0), cx.unsqueeze(0)
                 )
                 probs = F.softmax(logits, dim=-1)
-                action = torch.argmax(probs.squeeze()).item()
+                action = torch.argmax(probs.squeeze(), dim=-1).item()
+                hx, cx = hx.squeeze(0).detach(), cx.squeeze(0).detach()  # carry state
             
             # Environment step
             obs_next, reward, terminated, truncated, info = env.step(action)
@@ -232,16 +237,7 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
             episode_errors.append(info.get("timestep_error", 0.0))
             condition_action_distribution[action] += 1
             eval_results['overall_action_distribution'][action] += 1
-            
-            # # Collect detailed episode data
-            # episode_data['cpu_times'].append(info.get("cpu_time", 0.0))
-            # episode_data['actions'].append(action)
-            # episode_data['rewards'].append(reward)
-            # episode_data['timestep_errors'].append(info.get("timestep_error", 0.0))
-            # episode_data['trajectory'].append(env.current_state.copy())
-            # episode_data['temperatures'].append(env.current_state[0])
-            # episode_data['times'].append(env.current_time)
-            
+
             episode_length += 1
             obs = obs_next
             done = terminated or truncated
@@ -323,27 +319,27 @@ def evaluate_policy(policy: PolicyLSTM, env: IntegratorSwitchingEnv, obs_rms: Ru
     # Log to Neptune
     if neptune_run:
         # Overall metrics
-        neptune_run[f"eval/update_{update}/overall/mean_reward"] = eval_summary['mean_reward']
-        neptune_run[f"eval/update_{update}/overall/std_reward"] = eval_summary['std_reward']
-        neptune_run[f"eval/update_{update}/overall/mean_cpu_time"] = eval_summary['mean_cpu_time']
-        neptune_run[f"eval/update_{update}/overall/mean_violation_rate"] = eval_summary['mean_violation_rate']
-        neptune_run[f"eval/update_{update}/overall/mean_error"] = eval_summary['mean_error']
-        neptune_run[f"eval/update_{update}/overall/mean_episode_length"] = eval_summary['mean_episode_length']
-        neptune_run[f"eval/update_{update}/overall/action_0_ratio"] = eval_summary['action_0_ratio']
-        neptune_run[f"eval/update_{update}/overall/action_1_ratio"] = eval_summary['action_1_ratio']
+        neptune_run[f"eval/mean_reward"] = eval_summary['mean_reward']
+        neptune_run[f"eval/std_reward"] = eval_summary['std_reward']
+        neptune_run[f"eval/mean_cpu_time"] = eval_summary['mean_cpu_time']
+        neptune_run[f"eval/mean_violation_rate"] = eval_summary['mean_violation_rate']
+        neptune_run[f"eval/mean_error"] = eval_summary['mean_error']
+        neptune_run[f"eval/mean_episode_length"] = eval_summary['mean_episode_length']
+        neptune_run[f"eval/action_0_ratio"] = eval_summary['action_0_ratio']
+        neptune_run[f"eval/action_1_ratio"] = eval_summary['action_1_ratio']
         
         # Condition-specific metrics
         for condition_name, condition_data in eval_results['condition_results'].items():
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/reward"] = condition_data['reward']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/mean_cpu_time"] = condition_data['mean_cpu_time']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/mean_violation_rate"] = condition_data['mean_violation_rate']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/mean_error"] = condition_data['mean_error']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/episode_length"] = condition_data['episode_length']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/action_0_ratio"] = condition_data['action_0_ratio']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/action_1_ratio"] = condition_data['action_1_ratio']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/temperature"] = condition_data['temperature']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/pressure"] = condition_data['pressure']
-            neptune_run[f"eval/update_{update}/conditions/{condition_name}/phi"] = condition_data['phi']
+            neptune_run[f"eval/conditions/{condition_name}/reward"] = condition_data['reward']
+            neptune_run[f"eval/conditions/{condition_name}/mean_cpu_time"] = condition_data['mean_cpu_time']
+            neptune_run[f"eval/conditions/{condition_name}/mean_violation_rate"] = condition_data['mean_violation_rate']
+            neptune_run[f"eval/conditions/{condition_name}/mean_error"] = condition_data['mean_error']
+            neptune_run[f"eval/conditions/{condition_name}/episode_length"] = condition_data['episode_length']
+            neptune_run[f"eval/conditions/{condition_name}/action_0_ratio"] = condition_data['action_0_ratio']
+            neptune_run[f"eval/conditions/{condition_name}/action_1_ratio"] = condition_data['action_1_ratio']
+            neptune_run[f"eval/conditions/{condition_name}/temperature"] = condition_data['temperature']
+            neptune_run[f"eval/conditions/{condition_name}/pressure"] = condition_data['pressure']
+            neptune_run[f"eval/conditions/{condition_name}/phi"] = condition_data['phi']
     
     return eval_summary, eval_results
 
@@ -600,7 +596,7 @@ def train(args):
     ppo = PPO(policy, PPOConfig(
         clip_coef=args.clip_coef, vf_coef=args.vf_coef, ent_coef=args.ent_coef,
         max_grad_norm=args.max_grad_norm, lr=args.lr, epochs=args.epochs,
-        seq_len=args.horizon, batch_seqs=args.batch_seqs, target_kl=args.target_kl,
+        seq_len=args.seq_len, batch_seqs=args.batch_seqs, target_kl=args.target_kl,
         device=str(device)
     ))
 
@@ -650,8 +646,10 @@ def train(args):
         cx = torch.zeros(args.hidden, device=device)
 
         pbar = tqdm(total=args.rollout_steps, desc="Rollout")
+        raw_obs_list = []
         for t in range(args.rollout_steps):
             # normalize on the fly with current stats
+            raw_obs_list.append(obs.copy())
             obs_n = obs_rms.normalize(obs)
             # model step (sampled action from policy)
             with torch.no_grad():
@@ -711,7 +709,7 @@ def train(args):
             })
         pbar.close()
         # update obs rms using rollout observations
-        obs_rms.update(buffer.obs[:buffer.ptr])
+        obs_rms.update(np.asarray(raw_obs_list, dtype=np.float32))
 
         # bootstrap last value for GAE
         with torch.no_grad():
@@ -816,20 +814,25 @@ def train(args):
     save_training_plots(log, args.out_dir)
     torch.save(policy.state_dict(), os.path.join(args.out_dir, "ppo_lstm_final.pt"))
     policy.eval()  # Set to eval mode for TorchScript tracing
+    
+    # Create a copy of the model with detached parameters for JIT tracing
+    policy_copy = PolicyLSTM(args.obs_dim, args.hidden, args.action_dim)
+    policy_copy.load_state_dict(policy.state_dict())
+    policy_copy.eval()
+    
+    # Detach all parameters from gradients
+    for param in policy_copy.parameters():
+        param.requires_grad_(False)
+    
     with torch.no_grad():  # Disable gradients for tracing
         example_obs = torch.from_numpy(obs0.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,D]
         h0 = torch.zeros(1, 1, args.hidden); c0 = torch.zeros(1, 1, args.hidden)
-        scripted = torch.jit.trace(lambda o,h,c: policy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
+        scripted = torch.jit.trace(lambda o,h,c: policy_copy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
         scripted.save(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
     print(f"[done] training complete. Artifacts in: {args.out_dir}")
 
     
-    
-    # # TorchScript for easier deployment
-    # example_obs = torch.from_numpy(obs0.astype(np.float32)).unsqueeze(0).unsqueeze(0)  # [1,1,D]
-    # h0 = torch.zeros(1, 1, args.hidden); c0 = torch.zeros(1, 1, args.hidden)
-    # scripted = torch.jit.trace(lambda o,h,c: policy(o,h.squeeze(0),c.squeeze(0)), (example_obs, h0, c0))
-    # scripted.save(os.path.join(args.out_dir, "ppo_lstm_final_scripted.pt"))
+
     
     # Final evaluation
     print("[eval] Running final evaluation...")
@@ -864,8 +867,8 @@ if __name__ == "__main__":
     ap.add_argument("--mechanism", type=str, default="large_mechanism/n-dodecane.yaml")
     ap.add_argument("--fuel", type=str, default="nc12h26")
     ap.add_argument("--oxidizer", type=str, default="O2:0.21, N2:0.79")
-    ap.add_argument("--epsilon", type=float, default=1e-2)
-    ap.add_argument("--horizon", type=int, default=100)
+    ap.add_argument("--epsilon", type=float, default=1e-3)
+    ap.add_argument("--super_steps", type=int, default=100)
     # IC sampling ranges for training (curriculum-like)
     ap.add_argument("--T_low", type=float, default=600.0)
     ap.add_argument("--T_high", type=float, default=1200.0)
@@ -874,7 +877,7 @@ if __name__ == "__main__":
     ap.add_argument("--P_low", type=float, default=1.0)
     ap.add_argument("--P_high", type=float, default=10.0)
     ap.add_argument("--time_low", type=float, default=1e-3)
-    ap.add_argument("--time_high", type=float, default=1e-2)
+    ap.add_argument("--time_high", type=float, default=1e-1)
     ap.add_argument("--dt", type=float, default=1e-6)
 
     # PPO/LSTM
@@ -895,7 +898,7 @@ if __name__ == "__main__":
     ap.add_argument("--total_updates", type=int, default=300)
     ap.add_argument("--plot_every", type=int, default=5)
     ap.add_argument("--ckpt_every", type=int, default=25)
-
+    ap.add_argument("--seq_len", type=int, default=128)
     # shield (confidence gate + hysteresis)
     ap.add_argument("--pmin", type=float, default=0.70)
     ap.add_argument("--hold_K", type=int, default=3)
@@ -908,7 +911,7 @@ if __name__ == "__main__":
     ap.add_argument("--eval_interval", type=int, default=10, help="Evaluate every N updates")
     ap.add_argument("--eval_episodes", type=int, default=20, help="Number of episodes for evaluation (deprecated - now uses fixed conditions)")
     ap.add_argument("--max_eval_steps", type=int, default=200, help="Maximum steps per evaluation episode")
-    ap.add_argument("--eval_time", type=float, default=7e-2, help="Fixed evaluation time for all test conditions")
+    ap.add_argument("--eval_time", type=float, default=5e-2, help="Fixed evaluation time for all test conditions")
     
     # Fixed evaluation conditions (lists of temperatures, pressures, and phis)
     ap.add_argument("--eval_temperatures", type=float, nargs='+', default=[650, 700, 1100], 

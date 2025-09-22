@@ -45,6 +45,33 @@ except Exception:
     neptune_init_run = None
     NeptuneFile = None
 
+
+class RunningMeanStd:
+    def __init__(self, shape, eps=1e-4):
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var  = np.ones(shape,  dtype=np.float64)
+        self.count = eps
+
+    def update(self, x: np.ndarray):
+        # x shape [N, obs_dim]
+        batch_mean = x.mean(axis=0)
+        batch_var  = x.var(axis=0)
+        batch_count = x.shape[0]
+        self._update_from_moments(batch_mean, batch_var, batch_count)
+
+    def _update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / tot
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta**2 * self.count * batch_count / tot
+        new_var = M2 / tot
+        self.mean, self.var, self.count = new_mean, new_var, tot
+
+    def normalize(self, x: np.ndarray):
+        return (x - self.mean) / (np.sqrt(self.var) + 1e-8)
+
 class PPONetwork(nn.Module):
     """Improved PPO Actor-Critic Network for combustion integrator selection"""
     
@@ -113,12 +140,11 @@ class PPONetwork(nn.Module):
 
 class PPOAgent:
     """PPO Agent for combustion integrator selection"""
-    
     def __init__(self, obs_dim, action_dim, lr=3e-3, gamma=0.99, gae_lambda=0.95,
                  clip_coef=0.2, ent_coef=0.3, vf_coef=0.5, max_grad_norm=0.5,
                  device='cuda' if torch.cuda.is_available() else 'cpu',
                  policy_network_arch=[256, 128, 64]):
-        
+
         self.device = device
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -126,176 +152,167 @@ class PPOAgent:
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
         self.max_grad_norm = max_grad_norm
-        
-        # Exploration parameters
+
+        # === Normalizer (owned by the agent) ===
+        self.obs_rms = RunningMeanStd(shape=obs_dim)
+
+        # Exploration params
         self.initial_ent_coef = ent_coef
         self.min_ent_coef = 0.01
         self.ent_coef_decay = 0.9995
         self.exploration_bonus = 0.1
         self.action_counts = {0: 0, 1: 0}
-        
-        # Initialize network
-        self.network = PPONetwork(obs_dim, action_dim, hidden_dims=policy_network_arch).to(device)
+
+        self.network = PPONetwork(obs_dim, action_dim, hidden_dims=policy_network_arch).to(device).float()
         self.optimizer = optim.Adam(self.network.parameters(), lr=lr, eps=1e-5)
-        
+
         print(f"PPO Agent initialized on {device}")
         print(f"Network parameters: {sum(p.numel() for p in self.network.parameters()):,}")
-    
-    def get_action(self, obs):
-        with torch.no_grad():
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-            logits, value = self.network(obs_tensor)
-            probs = Categorical(logits=logits)
-            action = probs.sample()
-            log_prob = probs.log_prob(action)
-            action_idx = int(action.item())
-            self.action_counts[action_idx] = self.action_counts.get(action_idx, 0) + 1
-            return action_idx, float(log_prob.item()), float(value.item())
 
-    
-    def get_value(self, obs):
-        with torch.no_grad():
-            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-            _, value = self.network(obs_tensor)
-            return value.cpu().numpy()[0][0]
-    
-    def update(
-    self,
-    rollout_data,
-    update_epochs: int = 3,
-    minibatch_size: int = 256,
-    target_kl: float = 0.02,
-    clip_coef_vf: float = 0.2,
-    use_huber_vf: bool = True,
-):
-        """
-        PPO policy/value update with value clipping and KL early-stop.
-        Expects advantages already normalized in the caller.
-        """
+    # --- helper: normalize numpy/tensor ---
+    def _norm_np(self, obs_np: np.ndarray) -> np.ndarray:
+        return self.obs_rms.normalize(obs_np)
 
-        # ----- Build tensors -----
+    def _norm_t(self, obs_t: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(self.obs_rms.mean, device=obs_t.device, dtype=obs_t.dtype)
+        std  = torch.sqrt(torch.as_tensor(self.obs_rms.var, device=obs_t.device, dtype=obs_t.dtype) + 1e-8)
+        return (obs_t - mean) / std
+
+    # call this from training code after collecting a rollout (see §3)
+    def update_obs_rms(self, obs_batch_np: np.ndarray):
+        # obs_batch_np: [N, obs_dim] raw observations
+        if obs_batch_np.ndim == 1:
+            obs_batch_np = obs_batch_np[None, :]
+        if len(obs_batch_np) > 0:
+            self.obs_rms.update(obs_batch_np.astype(np.float32))
+
+    @torch.no_grad()
+    def get_action(self, obs_raw_np):
+        # normalize inside the agent
+        x = self._norm_np(np.asarray(obs_raw_np, dtype=np.float32))
+        obs_t = torch.from_numpy(x).to(self.device, dtype=torch.float32).unsqueeze(0)
+        logits, value = self.network(obs_t)
+        probs = Categorical(logits=logits)
+        action = probs.sample()
+        log_prob = probs.log_prob(action)
+        a = int(action.item())
+        self.action_counts[a] = self.action_counts.get(a, 0) + 1
+        return a, float(log_prob.item()), float(value.item())
+
+    @torch.no_grad()
+    def act_deterministic(self, obs_raw_np):
+        x = self._norm_np(np.asarray(obs_raw_np, dtype=np.float32))
+        obs_t = torch.from_numpy(x).to(self.device, dtype=torch.float32).unsqueeze(0)
+        logits, _ = self.network(obs_t)
+        return int(torch.argmax(logits, dim=1).item())
+
+    @torch.no_grad()
+    def get_value(self, obs_raw_np):
+        x = self._norm_np(np.asarray(obs_raw_np, dtype=np.float32))
+        obs_t = torch.from_numpy(x).to(self.device, dtype=torch.float32).unsqueeze(0)
+        _, value = self.network(obs_t)
+        return value.squeeze(0).item()
+
+    def update(self,
+               rollout_data,
+               update_epochs: int = 3,
+               minibatch_size: int = 256,
+               target_kl: float = 0.02,
+               clip_coef_vf: float = 0.2,
+               use_huber_vf: bool = True):
+        """
+        PPO update. rollouts['observations'] should be RAW obs.
+        We normalize them inside using the FROZEN obs_rms.
+        """
         device = self.device
-        obs         = torch.as_tensor(rollout_data['observations'], dtype=torch.float32, device=device)
-        actions     = torch.as_tensor(rollout_data['actions'],       dtype=torch.long,   device=device)
-        old_logp    = torch.as_tensor(rollout_data['log_probs'],     dtype=torch.float32, device=device)
-        returns     = torch.as_tensor(rollout_data['returns'],       dtype=torch.float32, device=device)
-        old_values  = torch.as_tensor(rollout_data['values'],        dtype=torch.float32, device=device)
-        advantages  = torch.as_tensor(rollout_data['advantages'],    dtype=torch.float32, device=device)
+        obs_raw    = torch.as_tensor(rollout_data['observations'], dtype=torch.float32, device=device)
+        actions    = torch.as_tensor(rollout_data['actions'],       dtype=torch.long,   device=device)
+        old_logp   = torch.as_tensor(rollout_data['log_probs'],     dtype=torch.float32, device=device)
+        returns    = torch.as_tensor(rollout_data['returns'],       dtype=torch.float32, device=device)
+        old_values = torch.as_tensor(rollout_data['values'],        dtype=torch.float32, device=device).squeeze(-1)
+        advantages = torch.as_tensor(rollout_data['advantages'],    dtype=torch.float32, device=device)
 
-        batch_size = obs.shape[0]
+        batch_size = obs_raw.shape[0]
         indices = np.arange(batch_size)
 
-        # ----- Metric accumulators -----
-        all_policy_losses = []
-        all_value_losses  = []
-        all_entropy_vals  = []
-        all_total_losses  = []
-        all_approx_kls    = []
-        all_clipfracs     = []
-        all_explained_vars= []
-
+        logs = {"policy_loss":0.0,"value_loss":0.0,"entropy_loss":0.0,"total_loss":0.0,
+                "approx_kl":0.0,"clipfrac":0.0,"explained_variance":0.0}
+        count = 0
         early_stop = False
 
-        # ----- Epochs over shuffled minibatches -----
-        for epoch in range(update_epochs):
-            if early_stop:
-                break
+        for _ in range(update_epochs):
+            if early_stop: break
             np.random.shuffle(indices)
-
             for start in range(0, batch_size, minibatch_size):
                 end = start + minibatch_size
-                mb_idx = indices[start:end]
+                mb = indices[start:end]
 
-                mb_obs        = obs[mb_idx]
-                mb_actions    = actions[mb_idx]
-                mb_old_logp   = old_logp[mb_idx]
-                mb_returns    = returns[mb_idx]
-                mb_old_values = old_values[mb_idx].squeeze(-1)
-                mb_advs       = advantages[mb_idx]
-
-                # ----- Forward current policy -----
-                logits, v_pred = self.network(mb_obs)               # v_pred: [B, 1]
+                mb_obs_n = self._norm_t(obs_raw[mb])          # <<< normalize here
+                logits, v_pred = self.network(mb_obs_n)
+                v_pred = v_pred.squeeze(-1)
                 dist = Categorical(logits=logits)
-                new_logp = dist.log_prob(mb_actions)                # [B]
-                entropy  = dist.entropy().mean()                    # scalar
-                v_pred   = v_pred.squeeze(-1)                       # [B]
+                new_logp = dist.log_prob(actions[mb])
+                entropy = dist.entropy().mean()
 
-                # ----- Policy (clipped) loss -----
-                ratio = torch.exp(new_logp - mb_old_logp)           # [B]
-                surr1 = mb_advs * ratio
-                surr2 = mb_advs * torch.clamp(ratio, 1.0 - self.clip_coef, 1.0 + self.clip_coef)
+                ratio = torch.exp(new_logp - old_logp[mb])
+                surr1 = advantages[mb] * ratio
+                surr2 = advantages[mb] * torch.clamp(ratio, 1.0 - self.clip_coef, 1.0 + self.clip_coef)
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                # ----- Value loss with clipping -----
-                v_clipped = mb_old_values + (v_pred - mb_old_values).clamp(-clip_coef_vf, clip_coef_vf)
+                v_clip = old_values[mb] + (v_pred - old_values[mb]).clamp(-clip_coef_vf, clip_coef_vf)
                 if use_huber_vf:
-                    value_loss_unclipped = F.smooth_l1_loss(v_pred,   mb_returns, reduction='mean')
-                    value_loss_clipped   = F.smooth_l1_loss(v_clipped, mb_returns, reduction='mean')
+                    v_uncl = F.smooth_l1_loss(v_pred, returns[mb], reduction='mean')
+                    v_clp  = F.smooth_l1_loss(v_clip, returns[mb], reduction='mean')
                 else:
-                    value_loss_unclipped = F.mse_loss(v_pred,   mb_returns, reduction='mean')
-                    value_loss_clipped   = F.mse_loss(v_clipped, mb_returns, reduction='mean')
-                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+                    v_uncl = F.mse_loss(v_pred, returns[mb], reduction='mean')
+                    v_clp  = F.mse_loss(v_clip, returns[mb], reduction='mean')
+                value_loss = torch.max(v_uncl, v_clp)
 
-                # ----- Total loss -----
                 loss = policy_loss + self.vf_coef * value_loss - self.ent_coef * entropy
 
-                # ----- Backprop -----
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
-                # ----- Diagnostics -----
                 with torch.no_grad():
-                    # Better KL approx via log-ratio
-                    log_ratio = new_logp - mb_old_logp
+                    log_ratio = new_logp - old_logp[mb]
                     approx_kl = ((log_ratio.exp() - 1.0) - log_ratio).mean().clamp_min(0.0)
-
                     clipfrac = ((ratio - 1.0).abs() > self.clip_coef).float().mean()
-
-                    var_y = mb_returns.var()
+                    var_y = returns[mb].var()
                     if var_y > 1e-8:
-                        explained_var = 1.0 - F.mse_loss(v_pred, mb_returns) / var_y
+                        ev = 1.0 - F.mse_loss(v_pred, returns[mb]) / var_y
                     else:
-                        explained_var = torch.tensor(0.0, device=device)
+                        ev = torch.tensor(0.0, device=device)
 
-                # Early stop if KL too large
                 if approx_kl.item() > target_kl:
                     early_stop = True
 
-                # Accumulate metrics
-                all_policy_losses.append(policy_loss.item())
-                all_value_losses.append(value_loss.item())
-                all_entropy_vals.append(entropy.item())
-                all_total_losses.append(loss.item())
-                all_approx_kls.append(approx_kl.item())
-                all_clipfracs.append(clipfrac.item())
-                all_explained_vars.append(float(explained_var.item()))
+                logs["policy_loss"] += policy_loss.item()
+                logs["value_loss"]  += value_loss.item()
+                logs["entropy_loss"]+= entropy.item()
+                logs["total_loss"]  += loss.item()
+                logs["approx_kl"]   += approx_kl.item()
+                logs["clipfrac"]    += clipfrac.item()
+                logs["explained_variance"] += float(ev.item())
+                count += 1
 
-            # (optional) print(f"Epoch {epoch+1}: KL={np.mean(all_approx_kls[-n_mbatches:]):.4f}")
+        for k in logs:
+            logs[k] = logs[k] / max(1, count)
 
-        # ----- Anneal entropy coefficient (gentle) -----
+        # anneal entropy
         self.ent_coef = max(self.min_ent_coef, self.ent_coef * self.ent_coef_decay)
 
-        # Keep action count integers bounded
-        total_actions = sum(self.action_counts.values())
-        if total_actions > 10000:
-            k = 0.5
+        # keep action counts bounded
+        tot = sum(self.action_counts.values())
+        if tot > 10000:
             for a in self.action_counts:
-                self.action_counts[a] = int(self.action_counts[a] * k)
+                self.action_counts[a] = int(self.action_counts[a] * 0.5)
 
-        # ----- Return averaged metrics -----
-        return {
-            'policy_loss':        float(np.mean(all_policy_losses)) if all_policy_losses else 0.0,
-            'value_loss':         float(np.mean(all_value_losses))  if all_value_losses  else 0.0,
-            'entropy_loss':       float(np.mean(all_entropy_vals))  if all_entropy_vals  else 0.0,
-            'total_loss':         float(np.mean(all_total_losses))  if all_total_losses  else 0.0,
-            'approx_kl':          float(np.mean(all_approx_kls))    if all_approx_kls    else 0.0,
-            'clipfrac':           float(np.mean(all_clipfracs))     if all_clipfracs     else 0.0,
-            'explained_variance': float(np.mean(all_explained_vars))if all_explained_vars else 0.0,
-            'entropy_coef':       float(self.ent_coef),
-            'action_counts':      self.action_counts.copy(),
-        }
+        logs['entropy_coef'] = float(self.ent_coef)
+        logs['action_counts'] = self.action_counts.copy()
+        return logs
+
 
 class DetailedLogger:
     """Comprehensive logging system for PPO training"""
@@ -999,20 +1016,7 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
             # Create progress bar for episode steps
             pbar = tqdm(total=env.horizon, desc=f"Episode {ep_idx+1}/{n_eval_episodes}")
             while not done:
-                # Get action (deterministic or stochastic)
-                if deterministic:
-                    # Use the most likely action (argmax of logits)
-                    with torch.no_grad():
-                        obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(agent.device)
-                        logits, _ = agent.network(obs_tensor)
-                        action_idx = torch.argmax(logits, dim=1).item()
-                        log_prob = torch.log_softmax(logits, dim=1)[0, action_idx].item()
-                        value = agent.get_value(obs)
-                    action = action_idx
-                else:
-                    action, log_prob, _, value = agent.get_action(obs)
-                
-                
+                action = agent.act_deterministic(obs) if deterministic else agent.get_action(obs)[0]
                 # Step environment
                 next_obs, reward, terminated, truncated, next_info = env.step(action)
                 done = terminated or truncated
@@ -1134,8 +1138,8 @@ def compute_gae(rewards, values, dones, next_value, gamma=0.99, gae_lambda=0.95)
     return np.array(returns, dtype=np.float32), np.array(advantages, dtype=np.float32)
 
 
-def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10, 
-              save_freq=100, plot_freq=500, eval_freq=500, eval_conditions=None, 
+def train_ppo(env, total_steps=1000000, rollout_length=2048, 
+              save_freq=100, plot_freq=100, eval_freq=100, eval_conditions=None, 
               n_eval_episodes=5, neptune_run: Optional[object] = None, const_pressure=None, **ppo_kwargs):
     """Fixed PPO training loop with proper periodic operations"""
     
@@ -1144,6 +1148,8 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
     action_dim = env.action_space.n
     
     agent = PPOAgent(obs_dim, action_dim, **ppo_kwargs)
+
+    
     
     # Initialize logger
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1153,11 +1159,12 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
     print("Starting PPO training...")
     print(f"Observation dim: {obs_dim}")
     print(f"Action dim: {action_dim} (solvers: {env.get_solver_names()})")
-    print(f"Total episodes: {total_episodes}")
+    print(f"Total steps: {total_steps}")
     
-    episode_count = 0
+    total_steps_collected = 0
     update_count = 0
     rollout_buffer = []
+    raw_obs_cache = []
     
     # Initialize first episode
     if const_pressure is not None:
@@ -1166,46 +1173,58 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
         obs, info = env.reset()
     done = False
     episode_data = {'actions': [], 'rewards': []}
-    
-    # Main training loop - now episode-driven
-    while episode_count < total_episodes:
-        
-        # Collect rollout data
+    raw_obs_cache.append(obs.copy()) 
+    # Main training loop - step-based with rollouts containing multiple episodes
+    while total_steps_collected < total_steps:
         steps_collected = 0
+        rollout_buffer.clear()
+        raw_obs_cache.clear()
         
-        while steps_collected < rollout_length:
+        # Start new rollout
+        if const_pressure is not None:
+            obs, info = env.reset(pressure=const_pressure*ct.one_atm)
+        else:
+            obs, info = env.reset()
+        done = False
+        episode_data = {'actions': [], 'rewards': []}
+        raw_obs_cache.append(obs.copy())
+        
+        # Progress bar for this rollout
+        pbar = tqdm(total=rollout_length, desc=f"Rollout {update_count+1} | Steps {total_steps_collected}")
+        
+        # Collect rollout data (may span multiple episodes)
+        while steps_collected < rollout_length and total_steps_collected < total_steps:
+            # Get action from agent
+            action, log_prob, value = agent.get_action(obs)
             
-            # Episode loop
-            pbar = tqdm(total=env.horizon, desc=f"Episode {episode_count}")
-            while not done and steps_collected < rollout_length:
-                # Get action from agent
-                action, log_prob, value = agent.get_action(obs)
-                
-                # Step environment
-                next_obs, reward, terminated, truncated, next_info = env.step(action)
-                done = terminated or truncated
-                
-                # Store transition in rollout buffer
-                rollout_buffer.append({
-                    'obs': obs.copy(),
-                    'action': action,
-                    'reward': reward,
-                    'log_prob': log_prob,
-                    'value': value,
-                    'done': done
-                })
-                
-                # Store episode-specific data
-                episode_data['actions'].append(action)
-                episode_data['rewards'].append(reward)
-                
-                steps_collected += 1
-                obs = next_obs
-                
-                temp = env.current_state[0]
-                cpu_time = next_info.get('cpu_time', 0)
-                ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
-                pbar.set_postfix({
+            # Step environment
+            next_obs, reward, terminated, truncated, next_info = env.step(action)
+            done = terminated or truncated
+            
+            # Store transition in rollout buffer
+            rollout_buffer.append({
+                'obs': obs.copy(),
+                'action': action,
+                'reward': reward,
+                'log_prob': log_prob,
+                'value': value,
+                'done': done
+            })
+            raw_obs_cache.append(next_obs.copy())
+            
+            # Store episode-specific data
+            episode_data['actions'].append(action)
+            episode_data['rewards'].append(reward)
+            
+            steps_collected += 1
+            total_steps_collected += 1
+            obs = next_obs
+            
+            # Update progress bar
+            temp = env.current_state[0]
+            cpu_time = next_info.get('cpu_time', 0)
+            ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
+            pbar.set_postfix({
                 'T': f'{temp:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K', 
                 'I': f'{env.current_pressure/ct.one_atm:.1f}bar | {env.current_phi:.2f}',
                 'A': action, 
@@ -1213,66 +1232,32 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
                 'C': f'{cpu_time:.3f}',
                 'E': f'{env.timestep_errors[-1]:.3f}',
                 'L': f'{(env.current_episode-1)*env.super_steps}/{len(env.ref_states)}'
-                })
-                pbar.update(1)
-                        
-            # Handle episode completion
+            })
+            pbar.update(1)
+            
+            # Handle episode completion within rollout
             if done:
+                # Log completed episode
+                logger.log_episode(total_steps_collected, episode_data, next_info)
                 
-                episode_count += 1
-                logger.log_episode(episode_count, episode_data, next_info)
-                
-                # Print progress periodically
-                if episode_count % 10 == 0:
-                    logger.print_progress(episode_count, total_episodes)
-                
-                # FIXED: Check periodic operations after each episode
-                # Model saving
-                if episode_count % save_freq == 0:
-                    logger.save_data(episode_count)
-                    model_path = os.path.join(logger.experiment_dir, 'models', f'model_ep_{episode_count}.pt')
-                    torch.save({
-                        'episode': episode_count,
-                        'model_state_dict': agent.network.state_dict(),
-                        'optimizer_state_dict': agent.optimizer.state_dict()
-                    }, model_path)
-                    print(f"Model saved at episode {episode_count}")
-                    if neptune_run is not None:
-                        try:
-                            neptune_run[f"models/model_ep_{episode_count}"].upload(model_path)
-                        except Exception as e:
-                            print(f"Warning: Failed to upload model to Neptune: {e}")
-                
-                # Plot generation
-                if episode_count % plot_freq == 0:
-                    print(f"Generating plots at episode {episode_count}")
-                    logger.create_plots()
-                
-                # Evaluation
-                if (eval_conditions and episode_count % eval_freq == 0) or episode_count == 1:
-                    print(f"Running evaluation at episode {episode_count}...")
-                    eval_results = evaluate_agent(agent, env, eval_conditions, n_eval_episodes, deterministic=True)
-                    logger.log_evaluation(episode_count, eval_results)
-                    logger.create_evaluation_plots(episode_count, eval_results)
-                
-                # Check if we've reached total episodes
-                if episode_count >= total_episodes:
-                    break
-                
-                # Start new episode if we need more steps
-                if steps_collected < rollout_length:
+                # Reset for next episode if we need more steps
+                if steps_collected < rollout_length and total_steps_collected < total_steps:
                     if const_pressure is not None:
                         obs, info = env.reset(pressure=const_pressure*ct.one_atm)
                     else:
                         obs, info = env.reset()
                     done = False
                     episode_data = {'actions': [], 'rewards': []}
-            
-            pbar.close()
+                    raw_obs_cache.append(obs.copy())
+        
+        pbar.close()
+        
+        # Update observation normalization stats
+        agent.update_obs_rms(np.asarray(raw_obs_cache, dtype=np.float32))
         
         # PPO update when we have enough data
         if len(rollout_buffer) >= rollout_length:
-            print(f"Performing PPO update after {steps_collected} steps, {episode_count} episodes")
+            print(f"Performing PPO update after {steps_collected} steps, {total_steps_collected} total steps")
             
             # Prepare rollout data
             rollout_data = {
@@ -1330,19 +1315,60 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
             # Log update
             logger.log_update(update_count, update_info)
             
+            # Periodic operations after PPO update
+            # Print progress periodically
+            if update_count % 10 == 0:
+                logger.print_progress(update_count, total_steps)
+            
+            # Model saving
+            if update_count % save_freq == 0:
+                logger.save_data(update_count)
+                model_path = os.path.join(logger.experiment_dir, 'models', f'model_update_{update_count}.pt')
+                torch.save({
+                    'update': update_count,
+                    'total_steps': total_steps_collected,
+                    'model_state_dict': agent.network.state_dict(),
+                    'optimizer_state_dict': agent.optimizer.state_dict(),
+                    'obs_mean': agent.obs_rms.mean,
+                    'obs_var': agent.obs_rms.var,
+                    'obs_count': agent.obs_rms.count
+                }, model_path)
+                print(f"Model saved at update {update_count}")
+                if neptune_run is not None:
+                    try:
+                        neptune_run[f"models/model_update_{update_count}"].upload(model_path)
+                    except Exception as e:
+                        print(f"Warning: Failed to upload model to Neptune: {e}")
+            
+            # Plot generation
+            if update_count % plot_freq == 0:
+                print(f"Generating plots at update {update_count}")
+                logger.create_plots()
+            
+            # Evaluation
+            if (eval_conditions and update_count % eval_freq == 0) or update_count == 1:
+                print(f"Running evaluation at update {update_count}...")
+                eval_results = evaluate_agent(agent, env, eval_conditions, n_eval_episodes, deterministic=True)
+                logger.log_evaluation(update_count, eval_results)
+                logger.create_evaluation_plots(update_count, eval_results)
+            
             # Clear rollout buffer
             rollout_buffer = []
     
     # Final save and cleanup
     print("Training completed. Saving final results...")
-    logger.save_data(episode_count)
+    logger.save_data(total_steps_collected)
     logger.create_plots()
     
     final_model_path = os.path.join(logger.experiment_dir, 'models', 'final_model.pt')
     torch.save({
-        'episode': episode_count,
+        'update': update_count,
+        'total_steps': total_steps_collected,
         'model_state_dict': agent.network.state_dict(),
-        'optimizer_state_dict': agent.optimizer.state_dict()
+        'optimizer_state_dict': agent.optimizer.state_dict(),
+        'obs_mean': agent.obs_rms.mean,
+        'obs_var': agent.obs_rms.var,
+        'obs_count': agent.obs_rms.count
     }, final_model_path)
     if neptune_run is not None:
         try:
@@ -1353,7 +1379,7 @@ def train_ppo(env, total_episodes=5000, rollout_length=2048, update_freq=10,
     return agent, logger
 
 
-from reward_model import LagrangeReward1
+from reward_model import LagrangeReward1, ConstrainedReward
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train PPO on combustion integrator switching")
@@ -1367,15 +1393,13 @@ if __name__ == "__main__":
                        help='Oxidizer specification')
     
     # Training arguments
-    parser.add_argument('--total-episodes', type=int, default=5000,
-                       help='Total training episodes')
+    parser.add_argument('--total-steps', type=int, default=1000000,
+                       help='Total training steps')
     parser.add_argument('--rollout-length', type=int, default=2048,
                        help='Rollout length for PPO updates')
-    parser.add_argument('--update-freq', type=int, default=10,
-                       help='Update frequency')
-    parser.add_argument('--save-freq', type=int, default=100,
+    parser.add_argument('--save-freq', type=int, default=10,
                        help='Model save frequency')
-    parser.add_argument('--plot-freq', type=int, default=500,
+    parser.add_argument('--plot-freq', type=int, default=10,
                        help='Plot generation frequency')
     
     
@@ -1390,7 +1414,7 @@ if __name__ == "__main__":
                        help='Optional display name for the Neptune run')
     
     # Evaluation arguments
-    parser.add_argument('--eval-freq', type=int, default=200,
+    parser.add_argument('--eval-freq', type=int, default=10,
                        help='Evaluation frequency (episodes)')
     parser.add_argument('--n-eval-episodes', type=int, default=1,
                        help='Number of evaluation episodes per condition set')
@@ -1436,7 +1460,7 @@ if __name__ == "__main__":
                        help='Timestep range')
     parser.add_argument('--etol', type=float, default=1e-2,
                        help='Error tolerance')
-    parser.add_argument('--horizon', type=int, default=100,
+    parser.add_argument('--super-steps', type=int, default=100,
                        help='Number of super steps per episode')
     
     # Reward function parameters
@@ -1517,15 +1541,11 @@ if __name__ == "__main__":
         print("Make sure environment.py is in the same directory or in your Python path")
         exit(1)
     # Reward function configuration
-    reward_config = {
-        'epsilon': args.epsilon,
-        'lambda_init': args.lambda_init,
-        'lambda_lr': args.lambda_lr,
-        'target_violation': args.target_violation,
-        'cpu_log_delta': args.cpu_log_delta,
-        'reward_clip': args.reward_clip
-    }
-    reward_function = LagrangeReward1(**reward_config)
+    reward_cfg = dict(epsilon=args.epsilon, lambda_init=1.0, lambda_lr=0.05,
+                      target_violation=0.0, cpu_log_delta=1e-3, reward_clip=10.0,
+                      cpu_time_baseline=0.005, soft_margin_decades=0.15, switch_penalty=0.02,
+                      ema_alpha=0.3, lambda_max=1e4)
+    reward_function = ConstrainedReward(**reward_cfg)
     
     # Solver configurations (matching your environment setup)
     solver_configs = [
@@ -1546,7 +1566,7 @@ if __name__ == "__main__":
         time_range=(1e-3, 1e-1),
         dt_range=(1e-6, 1e-6),
         etol=args.etol,
-        horizon=args.horizon,
+        super_steps=args.super_steps,
         reward_function=reward_function,
         solver_configs=solver_configs,
         verbose=args.verbose,
@@ -1578,7 +1598,7 @@ if __name__ == "__main__":
     try:
         if neptune_run is not None:
             neptune_run["config/ppo_kwargs_json"] = json.dumps(ppo_kwargs)
-            neptune_run["reward_config_json"] = json.dumps(reward_config)
+            neptune_run["reward_config_json"] = json.dumps(reward_cfg)
             neptune_run["solver_configs_json"] = json.dumps(solver_configs)
     except Exception as _:
         # Best-effort logging; ignore Neptune type issues
@@ -1616,21 +1636,20 @@ if __name__ == "__main__":
         print(f"  Set {i+1}: T={cond['temperature']:.0f}K, P={cond['pressure']:.1f}bar, φ={cond['phi']:.2f}, Total time={cond['total_time']:.2e}s")
     
     # Start training
-    print(f"\nStarting PPO training with {args.total_episodes} episodes...")
+    print(f"\nStarting PPO training with {args.total_steps} steps...")
     
     try:
         agent, logger = train_ppo(
             env=env,
-            total_episodes=args.total_episodes,
+            total_steps=args.total_steps,
             rollout_length=args.rollout_length,
-            update_freq=args.update_freq,
             save_freq=args.save_freq,
             plot_freq=args.plot_freq,
             eval_freq=args.eval_freq,
             eval_conditions=eval_conditions,
             n_eval_episodes=args.n_eval_episodes,
             neptune_run=neptune_run,
-            const_pressure=1,
+            const_pressure=None,
             **ppo_kwargs
         )
         

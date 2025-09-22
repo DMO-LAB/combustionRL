@@ -19,7 +19,7 @@ python train_ppo_lstm.py \
     --fuel nc12h26 \
     --oxidizer "O2:0.21, N2:0.79" \
     --epsilon 1e-4 \
-    --horizon 100 \
+    --super_steps 100 \
     --rollout_steps 2048 \
     --total_updates 300 \
     --eval_interval 10 \
@@ -27,5 +27,6 @@ python train_ppo_lstm.py \
     --eval_temperatures 650 700 1100 \
     --eval_pressures 3.0 10.0 1.0 \
     --eval_phis 1 1.66 1.0 \
+    --seq_len 100 \
     --out_dir ppo_runs/run_lstm \
     2>&1 | tee run_lstm1.log

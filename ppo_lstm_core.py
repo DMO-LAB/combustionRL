@@ -104,27 +104,59 @@ class RolloutBufferRecurrent:
         return adv, ret
 
     # For recurrent PPO we form mini-batches of sequences with stored initial hidden states
+    # def iter_minibatches(self, seq_len, batch_seqs, adv, ret, shuffle=True):
+    #     S = self.ptr
+    #     # valid sequence starts: [0, S-seq_len]
+    #     starts = np.arange(0, S, seq_len)
+    #     # trim last partial chunk
+    #     if starts[-1] + seq_len > S:
+    #         starts = starts[:-1]
+    #     if shuffle:
+    #         np.random.shuffle(starts)
+    #     # group starts into minibatches
+    #     for i in range(0, len(starts), batch_seqs):
+    #         batch_starts = starts[i:i+batch_seqs]
+    #         # stack sequences for this batch
+    #         obs   = np.stack([self.obs[s:s+seq_len]   for s in batch_starts], axis=0)        # [B, T, D]
+    #         acts  = np.stack([self.actions[s:s+seq_len] for s in batch_starts], axis=0)      # [B, T]
+    #         oldlp = np.stack([self.logprobs[s:s+seq_len] for s in batch_starts], axis=0)     # [B, T]
+    #         vals  = np.stack([self.values[s:s+seq_len] for s in batch_starts], axis=0)       # [B, T]
+    #         advb  = np.stack([adv[s:s+seq_len]         for s in batch_starts], axis=0)       # [B, T]
+    #         retb  = np.stack([ret[s:s+seq_len]         for s in batch_starts], axis=0)       # [B, T]
+    #         h0    = np.stack([self.hxs[s]              for s in batch_starts], axis=0)       # [B, H]
+    #         c0    = np.stack([self.cxs[s]              for s in batch_starts], axis=0)       # [B, H]
+    #         yield obs, acts, oldlp, vals, advb, retb, h0, c0
     def iter_minibatches(self, seq_len, batch_seqs, adv, ret, shuffle=True):
         S = self.ptr
-        # valid sequence starts: [0, S-seq_len]
-        starts = np.arange(0, S, seq_len)
-        # trim last partial chunk
-        if starts[-1] + seq_len > S:
-            starts = starts[:-1]
+        # find episode segments [start, end) where dones inside are cut
+        done_idx = np.nonzero(self.dones[:S])[0]
+        seg_starts = np.r_[0, done_idx + 1]
+        seg_ends   = np.r_[done_idx + 1, S]
+
+        starts = []
+        for a, b in zip(seg_starts, seg_ends):
+            L = b - a
+            if L < 1: 
+                continue
+            # slide with stride=seq_len (you can choose overlap if you like)
+            for s in range(a, max(a, b - seq_len) + 1, seq_len):
+                if s + seq_len <= b:
+                    starts.append(s)
+
+        starts = np.asarray(starts, dtype=np.int32)
         if shuffle:
             np.random.shuffle(starts)
-        # group starts into minibatches
+
         for i in range(0, len(starts), batch_seqs):
             batch_starts = starts[i:i+batch_seqs]
-            # stack sequences for this batch
-            obs   = np.stack([self.obs[s:s+seq_len]   for s in batch_starts], axis=0)        # [B, T, D]
-            acts  = np.stack([self.actions[s:s+seq_len] for s in batch_starts], axis=0)      # [B, T]
-            oldlp = np.stack([self.logprobs[s:s+seq_len] for s in batch_starts], axis=0)     # [B, T]
-            vals  = np.stack([self.values[s:s+seq_len] for s in batch_starts], axis=0)       # [B, T]
-            advb  = np.stack([adv[s:s+seq_len]         for s in batch_starts], axis=0)       # [B, T]
-            retb  = np.stack([ret[s:s+seq_len]         for s in batch_starts], axis=0)       # [B, T]
-            h0    = np.stack([self.hxs[s]              for s in batch_starts], axis=0)       # [B, H]
-            c0    = np.stack([self.cxs[s]              for s in batch_starts], axis=0)       # [B, H]
+            obs   = np.stack([self.obs[s:s+seq_len]      for s in batch_starts], axis=0)
+            acts  = np.stack([self.actions[s:s+seq_len]  for s in batch_starts], axis=0)
+            oldlp = np.stack([self.logprobs[s:s+seq_len] for s in batch_starts], axis=0)
+            vals  = np.stack([self.values[s:s+seq_len]   for s in batch_starts], axis=0)
+            advb  = np.stack([adv[s:s+seq_len]           for s in batch_starts], axis=0)
+            retb  = np.stack([ret[s:s+seq_len]           for s in batch_starts], axis=0)
+            h0    = np.stack([self.hxs[s]                for s in batch_starts], axis=0)
+            c0    = np.stack([self.cxs[s]                for s in batch_starts], axis=0)
             yield obs, acts, oldlp, vals, advb, retb, h0, c0
 
 
