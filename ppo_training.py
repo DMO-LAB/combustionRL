@@ -1458,13 +1458,13 @@ if __name__ == "__main__":
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
-    parser.add_argument('--etol', type=float, default=1e-2,
+    parser.add_argument('--etol', type=float, default=1e-3,
                        help='Error tolerance')
     parser.add_argument('--super-steps', type=int, default=100,
                        help='Number of super steps per episode')
     
     # Reward function parameters
-    parser.add_argument('--epsilon', type=float, default=1e-2,
+    parser.add_argument('--epsilon', type=float, default=1e-3,
                        help='Error threshold for reward function')
     parser.add_argument('--lambda-init', type=float, default=1.0,
                        help='Lambda initial value')
