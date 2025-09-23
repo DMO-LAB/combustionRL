@@ -1463,9 +1463,9 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
                        help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[30, 60],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-2],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
@@ -1571,11 +1571,11 @@ if __name__ == "__main__":
         mechanism_file=args.mechanism_file,
         fuel=args.fuel,
         oxidizer=args.oxidizer,
-        temp_range=(300, 1200),
-        phi_range=(0.5, 2.0),
-        pressure_range=(1, 10),
-        time_range=(1e-3, 1e-1),
-        dt_range=(1e-6, 1e-6),
+        temp_range=args.temp_range,
+        phi_range=args.phi_range,
+        pressure_range=args.pressure_range,
+        time_range=args.time_range,
+        dt_range=args.dt_range,
         etol=args.etol,
         super_steps=args.super_steps,
         reward_function=reward_function,

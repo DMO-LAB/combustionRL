@@ -136,14 +136,14 @@ class IntegratorSwitchingEnv(gym.Env):
             self.current_species = state[:-2]
             print(f"Using initial state: {self.current_temp}, {self.current_pressure}")
         else:
-            pressure_range = np.arange(1, 11, 1)
+            #pressure_range = np.arange(1, 11, 1)
             
             self.current_temp = kwargs.get('temperature', 
                                         np.random.uniform(*self.temp_range))
             self.current_phi = kwargs.get('phi', 
                                         np.random.uniform(*self.phi_range))
             self.current_pressure = kwargs.get('pressure', 
-                                            np.random.choice(pressure_range) * ct.one_atm)
+                                            np.random.uniform(*self.pressure_range) * ct.one_atm)
         
         self.total_time = kwargs.get('total_time', 
                                    np.random.uniform(*self.time_range))
