@@ -38,7 +38,7 @@ plt.rcParams.update({
 def make_env(args):
     reward_cfg = dict(epsilon=args.epsilon, lambda_init=1.0, lambda_lr=0.05,
                       target_violation=0.0, cpu_log_delta=1e-3, reward_clip=10.0,
-                      cpu_time_baseline=0.005, soft_margin_decades=0.15, switch_penalty=0.02,
+                      cpu_time_baseline=0.001, soft_margin_decades=0.15, switch_penalty=0.02,
                       ema_alpha=0.3, lambda_max=1e4)
                       
     env = IntegratorSwitchingEnv(
