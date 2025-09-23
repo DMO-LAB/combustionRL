@@ -875,7 +875,7 @@ if __name__ == "__main__":
     ap.add_argument("--phi_low", type=float, default=0.7)
     ap.add_argument("--phi_high", type=float, default=1.6)
     ap.add_argument("--P_low", type=float, default=1.0)
-    ap.add_argument("--P_high", type=float, default=10.0)
+    ap.add_argument("--P_high", type=float, default=60.0)
     ap.add_argument("--time_low", type=float, default=1e-3)
     ap.add_argument("--time_high", type=float, default=1e-1)
     ap.add_argument("--dt", type=float, default=1e-6)

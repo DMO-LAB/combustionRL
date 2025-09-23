@@ -74,7 +74,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.action_space = spaces.Discrete(len(self.solver_configs))
         
         self.key_species = ['O','H','OH','H2O','O2','H2','H2O2','N2']  # fix typo & duplicates
-        obs_size = 2 + len(self.key_species) + 1 # base (T + species + pressure)
+        obs_size = 2 + len(self.key_species) # base (T + species + pressure)
         self.observation_space = spaces.Box(low=-50., high=50., shape=(2*obs_size,), dtype=np.float32)
 
         self.representative_species = ['ch4', 'o2', 'h2o', 'co2', 'oh'] if mechanism_file == 'gri30.yaml' else ['nc12h26', 'o2', 'h2o', 'co2', 'oh']
@@ -251,13 +251,8 @@ class IntegratorSwitchingEnv(gym.Env):
         species_log = np.log10(np.maximum(key_vals, 1e-20))
         pressure_log = np.log10(self.current_pressure / ct.one_atm)
 
-        # New: normalized time-left in the episode (clipped to [0, 1])
-        time_left = max(0.0, self.total_time - self.current_time)
-        # add tiny denom so division is always defined
-        time_left_norm = np.clip(time_left / (self.total_time + 1e-12), 0.0, 1.0)
-
         # base obs: [T_norm, logY(key species...), logP, time_left_norm]
-        base_obs = np.hstack([temp_norm, species_log, pressure_log, time_left_norm]).astype(np.float32)
+        base_obs = np.hstack([temp_norm, species_log, pressure_log]).astype(np.float32)
 
         # Trend features (delta over last base_obs)
         if getattr(self, "last_obs", None) is None:
@@ -563,10 +558,7 @@ class IntegratorSwitchingEnv(gym.Env):
         species_log = np.log10(np.maximum(key_vals, 1e-20))
         pressure_log = np.log10(self.current_pressure / ct.one_atm)
 
-        time_left = max(0.0, self.total_time - self.current_time)
-        time_left_norm = np.clip(time_left / (self.total_time + 1e-12), 0.0, 1.0)
-
-        base_obs = np.hstack([temp_norm, species_log, pressure_log, time_left_norm]).astype(np.float32)
+        base_obs = np.hstack([temp_norm, species_log, pressure_log]).astype(np.float32)
 
         if hasattr(self, 'last_obs'):
             if self.last_obs is None:

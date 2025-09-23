@@ -1176,7 +1176,7 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
     else:
         obs, info = env.reset()
     done = False
-    episode_data = {'actions': [], 'rewards': []}
+    # rollout_data = {'actions': [], 'rewards': []}
     raw_obs_cache.append(obs.copy()) 
     # Main training loop - step-based with rollouts containing multiple episodes
     while total_steps_collected < total_steps:
@@ -1196,6 +1196,8 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
         # Progress bar for this rollout
         pbar = tqdm(total=rollout_length, desc=f"Rollout {update_count+1} | Steps {total_steps_collected}")
         
+        rollout_rewards = []
+        rollout_cpu_times = []
         # Collect rollout data (may span multiple episodes)
         while steps_collected < rollout_length and total_steps_collected < total_steps:
             # Get action from agent
@@ -1219,7 +1221,8 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
             # Store episode-specific data
             episode_data['actions'].append(action)
             episode_data['rewards'].append(reward)
-            
+            rollout_rewards.append(reward)
+            rollout_cpu_times.append(next_info.get('cpu_time', 0))
             steps_collected += 1
             total_steps_collected += 1
             obs = next_obs
@@ -1255,6 +1258,8 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
                     raw_obs_cache.append(obs.copy())
         
         pbar.close()
+        # rollout_data['rewards'] = np.mean(np.array(rollout_rewards))
+        # rollout_data['cpu_times'] = np.mean(np.array(rollout_cpu_times))
         
         # Update observation normalization stats
         agent.update_obs_rms(np.asarray(raw_obs_cache, dtype=np.float32))
@@ -1304,6 +1309,8 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
 
             update_count += 1
             
+            update_info['rewards'] = np.mean(np.array(rollout_rewards))
+            update_info['cpu_times'] = np.mean(np.array(rollout_cpu_times))
             # Print update metrics
             print(f"Update {update_count}:")
             print(f"  Policy loss: {update_info['policy_loss']:.5f}")
@@ -1424,7 +1431,7 @@ if __name__ == "__main__":
                        help='Number of evaluation episodes per condition set')
     parser.add_argument('--eval-temp', nargs=3, type=float, default=[650, 700, 1100],
                        help='Evaluation temperatures (K)')
-    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[3.0, 10.0, 1.0],
+    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[60.0, 10.0, 1.0],
                        help='Evaluation pressures (bar)')
     parser.add_argument('--eval-phi', nargs=3, type=float, default=[1, 1.66, 1.0],
                        help='Evaluation equivalence ratios')
@@ -1456,7 +1463,7 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
                        help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 10],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
                        help='Pressure range (bar)')
     parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
                        help='Time range for simulations')
@@ -1476,7 +1483,7 @@ if __name__ == "__main__":
                        help='Lambda learning rate')
     parser.add_argument('--target-violation', type=float, default=0.0,
                        help='Target violation')
-    parser.add_argument('--cpu-log-delta', type=float, default=1e-3,
+    parser.add_argument('--cpu-log-delta', type=float, default=5e-4,
                        help='CPU log delta')
     parser.add_argument('--reward-clip', type=float, default=10.0,
                        help='Reward clip')
