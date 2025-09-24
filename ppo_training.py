@@ -805,7 +805,7 @@ class DetailedLogger:
             ax1 = axes[0, 0]
             ax1.plot(times, temperatures, 'b-', linewidth=2, label='Agent')
             if 'reference_temperatures' in episode_data:
-                ax1.plot(reference_times, reference_temperatures, 'r--', linewidth=2, label='Reference')
+                ax1.plot(reference_times[:len(times)], reference_temperatures[:len(times)], 'r--', linewidth=2, label='Reference')
             ax1.set_xlabel('Time (s)')
             ax1.set_ylabel('Temperature (K)')
             ax1.set_title('Temperature Profile')
@@ -854,7 +854,7 @@ class DetailedLogger:
             for s in range(len(species_names)):
                 specie_index = env.gas.species_index(species_names[s])
                 ax4.plot(np.arange(len(times)), species_profile[:, specie_index], label=f'{species_names[s]}')
-                ax4.plot(np.arange(len(reference_times)), reference_species[:, specie_index], label=f'{species_names[s]} Reference', linestyle='--')
+                ax4.plot(np.arange(len(reference_times))[:len(times)], reference_species[:, specie_index][:len(times)], label=f'{species_names[s]} Reference', linestyle='--')
             ax4.set_xlabel('Time (s)')
             ax4.set_ylabel('Species Concentration')
             ax4.set_title('Species Profile')
@@ -897,7 +897,7 @@ class DetailedLogger:
                 reference_times = episode_data['reference_times']
                 label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['phi']:.2f}"
                 ax1.plot(times, temperatures, color=colors[i], linewidth=2, label=label)
-                ax1.plot(reference_times, reference_temperatures, color='black', linewidth=2, label='Reference', linestyle='--')
+                ax1.plot(reference_times[:len(times)], reference_temperatures[:len(times)], color='black', linewidth=2, label='Reference', linestyle='--')
         
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Temperature (K)')
@@ -1463,7 +1463,7 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
                        help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[30, 60],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
                        help='Pressure range (bar)')
     parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-2],
                        help='Time range for simulations')
@@ -1584,7 +1584,7 @@ if __name__ == "__main__":
         terminated_by_steady_state=False,
         precompute_reference=True,
         track_trajectory=True,
-        termination_count_threshold=20
+        termination_count_threshold=100
     )
     
     print(f"Environment created successfully!")

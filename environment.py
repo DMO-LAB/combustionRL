@@ -342,8 +342,7 @@ class IntegratorSwitchingEnv(gym.Env):
         terminated = (
             (self.current_time >= self.total_time) or
             (self.terminated_by_steady_state and self.reached_steady_state) or
-            (self.count_since_steady_state >= self.termination_count_threshold) or
-            (self.current_episode + 1 >= self.horizon)   # +1 because we’re about to increment
+            (self.count_since_steady_state >= self.termination_count_threshold)
         )
 
         if terminated and hasattr(self.reward_function, 'end_episode_update_lambda'):
