@@ -342,7 +342,8 @@ class IntegratorSwitchingEnv(gym.Env):
         terminated = (
             (self.current_time >= self.total_time) or
             (self.terminated_by_steady_state and self.reached_steady_state) or
-            (self.count_since_steady_state >= self.termination_count_threshold)
+            (self.count_since_steady_state >= self.termination_count_threshold) or
+            (self.current_episode + 1 >= self.horizon)
         )
 
         if terminated and hasattr(self.reward_function, 'end_episode_update_lambda'):
@@ -366,7 +367,9 @@ class IntegratorSwitchingEnv(gym.Env):
                 else ('time_exhausted' if self.current_time >= self.total_time
                     else ('max_episodes' if (self.current_episode + 1 >= self.horizon)
                             else ('steady_count' if self.count_since_steady_state >= self.termination_count_threshold
-                                else 'ongoing')))
+                                else ('max_episodes' if (self.current_episode + 1 >= self.horizon)
+                                    else 'ongoing')))
+                            )
             ),
         })
 
@@ -472,6 +475,7 @@ class IntegratorSwitchingEnv(gym.Env):
             if self.verbose:
                 print(f"Solver {config['name']} failed: {e}")
             
+            self.current_time = self.current_time + self.dt
             # Handle failed integration
             timestep_error = float('inf')
             self.timestep_errors.append(timestep_error)
