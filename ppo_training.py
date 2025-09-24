@@ -1465,7 +1465,7 @@ if __name__ == "__main__":
                        help='Equivalence ratio range')
     parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-2],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
