@@ -165,11 +165,11 @@ class ConstrainedReward:
 
         # Encourage using the cheaper solver when comfortably safe
         # (comfort ~ how many soft-margin units below epsilon we are)
-        if action == 1:
-            r += 0.5 * comfort
+        # if action == 1:
+        #     r += 0.5 * comfort
         # else:
         #     r -= 0.5 * comfort
-        # r += 0.25 * comfort  # small positive; keeps scale modest
+        r += 0.25 * comfort  # small positive; keeps scale modest
 
         # Action chattering penalty (discourage rapid switching)
         if (self._prev_action is not None) and (action is not None) and (action != self._prev_action):
@@ -191,8 +191,8 @@ class ConstrainedReward:
         if reached_steady_state and violation == 0.0:
             if action == 1:
                 r += 0.5
-            else:
-                r -= 0.5
+            # else:
+            #     r -= 0.5
 
         # Clip for PPO stability
         reward = float(np.clip(r, -self.reward_clip, self.reward_clip))

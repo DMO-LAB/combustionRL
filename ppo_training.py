@@ -1429,9 +1429,9 @@ if __name__ == "__main__":
                        help='Evaluation frequency (episodes)')
     parser.add_argument('--n-eval-episodes', type=int, default=1,
                        help='Number of evaluation episodes per condition set')
-    parser.add_argument('--eval-temp', nargs=3, type=float, default=[650, 700, 1100],
+    parser.add_argument('--eval-temp', nargs=3, type=float, default=[650, 800, 1050],
                        help='Evaluation temperatures (K)')
-    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[60.0, 10.0, 1.0],
+    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[60.0, 30.0, 10.0],
                        help='Evaluation pressures (bar)')
     parser.add_argument('--eval-phi', nargs=3, type=float, default=[1, 1.66, 1.0],
                        help='Evaluation equivalence ratios')
@@ -1463,19 +1463,19 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
                        help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[10, 60],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-2],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
-    parser.add_argument('--etol', type=float, default=1e-3,
+    parser.add_argument('--etol', type=float, default=1e-4,
                        help='Error tolerance')
-    parser.add_argument('--super-steps', type=int, default=100,
+    parser.add_argument('--super-steps', type=int, default=10,
                        help='Number of super steps per episode')
     
     # Reward function parameters
-    parser.add_argument('--epsilon', type=float, default=1e-3,
+    parser.add_argument('--epsilon', type=float, default=1e-4,
                        help='Error threshold for reward function')
     parser.add_argument('--lambda-init', type=float, default=1.0,
                        help='Lambda initial value')
@@ -1584,7 +1584,7 @@ if __name__ == "__main__":
         terminated_by_steady_state=False,
         precompute_reference=True,
         track_trajectory=True,
-        termination_count_threshold=100
+        termination_count_threshold=1000
     )
     
     print(f"Environment created successfully!")
