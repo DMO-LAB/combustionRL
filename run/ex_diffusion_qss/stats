@@ -1,0 +1,19 @@
+
+   *** Performance Stats ***       time   ( call count )
+                General Setup:      0.136 (          61)
+             Split Term Setup:      0.057 (          61)
+              Grid Adaptation:      0.055 (           3)
+    Reaction Term Integration:      0.222 (          61)
+   Diffusion Term Integration:      0.361 (         244)
+  Convection Term Integration:      0.260 (         122)
+                        Total:      1.130 (           1)
+
+ Subcomponents:
+               Reaction Rates:      0.251 (       27037)
+         Transport Properties:      0.023 (       15266)
+          - thermal cond.    :      0.005 (       15266)
+          - viscosity        :      0.003 (       15266)
+          - diffusion coeff. :      0.014 (       15266)
+     Thermodynamic Properties:      0.016 (       28744)
+   UTW Convection Integration:      0.009 (         122)
+    Yk Convection Integration:      0.251 (       12932)
