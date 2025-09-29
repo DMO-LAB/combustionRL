@@ -13,7 +13,7 @@ class IntegratorSwitchingEnv(gym.Env):
     
     def __init__(self, mechanism_file='gri30.yaml', 
                  fuel='CH4:1.0', oxidizer='N2:3.76, O2:1.0',
-                 temp_range=(1000, 1400), phi_range=(0.5, 2.0),
+                 temp_range=(1000, 1400), Z_range=(0, 1.0),
                  pressure_range=(1, 60), time_range=(1e-3, 1e-2),
                  dt_range=(1e-6, 1e-4),
                  dt=1e-6, etol=1e-3, super_steps=100,
@@ -37,7 +37,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.fuel = fuel
         self.oxidizer = oxidizer
         self.temp_range = temp_range
-        self.phi_range = phi_range
+        self.Z_range = Z_range
         self.pressure_range = pressure_range
         self.time_range = time_range
         self.dt = dt
@@ -105,6 +105,40 @@ class IntegratorSwitchingEnv(gym.Env):
                     pass
         return None
 
+    def mixture_sample(self, n_sample=1000, return_single=False, temperature=None):
+        """Sample mixture fraction from a range of strategies"""
+        samples = []
+        if temperature is None or temperature < 1300:
+             p=[0.2, 0.1, 0.2, 0.2, 0.1, 0.2]
+        else:
+            p=[0.1, 0.0, 0.0, 0.0, 0.4, 0.5]
+        for _ in range(n_sample):
+
+            # Choose sampling strategy randomly
+            strategy = np.random.choice(['tiny', 'small', 'medium', 'large', 'huge', 'massive'], 
+                                   p=p)
+
+
+            
+            if strategy == 'tiny':      # 1e-6 to 1e-4
+                samples.append(10 ** np.random.uniform(-8, -4))
+            elif strategy == 'small':   # 1e-4 to 0.01
+                samples.append(10 ** np.random.uniform(-4, -2))
+            elif strategy == 'medium':  # 0.01 to 0.1
+                samples.append(np.random.uniform(0.01, 0.1))
+            elif strategy == 'large':  # 0.1 to 0.3
+                samples.append(np.random.uniform(0.1, 0.5))
+            elif strategy == 'huge':  # 0.3 to 0.5
+                samples.append(np.random.uniform(0.6, 0.8))
+            elif strategy == 'massive':  # 0.5 to 1.0
+                samples.append(np.clip(np.random.uniform(0.8, 1.1), 0.6, 1.0))
+            else:
+                samples.append(np.random.uniform(0.1, 1.0))
+        if return_single:
+            return np.random.choice(samples)
+        else:
+            return np.array(samples)
+
     def _create_solver_instances(self):
         """Create all solver instances for current conditions"""
         self.solvers = []
@@ -140,8 +174,8 @@ class IntegratorSwitchingEnv(gym.Env):
             
             self.current_temp = kwargs.get('temperature', 
                                         np.random.uniform(*self.temp_range))
-            self.current_phi = kwargs.get('phi', 
-                                        np.random.uniform(*self.phi_range))
+            self.current_Z = kwargs.get('Z', 
+                                        self.mixture_sample(return_single=True, temperature=self.current_temp))
             self.current_pressure = kwargs.get('pressure', 
                                             np.random.uniform(*self.pressure_range) * ct.one_atm)
         
@@ -165,7 +199,7 @@ class IntegratorSwitchingEnv(gym.Env):
             print(f"Total episodes: {total_episodes}, Super steps: {self.super_steps}")
         
         if self.verbose:
-            print(f"Env Reset with temperature: {self.current_temp},  pressure: {self.current_pressure}, phi: {self.current_phi}, Total time: {self.total_time}, Dt: {self.dt}, Etol: {self.etol}")
+            print(f"Env Reset with temperature: {self.current_temp},  pressure: {self.current_pressure}, Z: {self.current_Z}, Total time: {self.total_time}, Dt: {self.dt}, Etol: {self.etol}")
         
         # Setup gas conditions
         self.gas = ct.Solution(self.mechanism_file)
@@ -174,12 +208,12 @@ class IntegratorSwitchingEnv(gym.Env):
             self.gas.TPY = self.current_temp, self.current_pressure, self.current_species
             self.ref_gas.TPY = self.current_temp, self.current_pressure, self.current_species
         else:
-            self.gas.set_equivalence_ratio(self.current_phi, self.fuel, self.oxidizer)
+            self.gas.set_mixture_fraction(self.current_Z, self.fuel, self.oxidizer)
             self.gas.TP = self.current_temp, self.current_pressure
-            self.ref_gas.set_equivalence_ratio(self.current_phi, self.fuel, self.oxidizer)
+            self.ref_gas.set_mixture_fraction(self.current_Z, self.fuel, self.oxidizer)
             self.ref_gas.TP = self.current_temp, self.current_pressure
         
-        self.current_phi = self.gas.equivalence_ratio(self.fuel, self.oxidizer)
+        self.current_Z = self.gas.mixture_fraction(self.fuel, self.oxidizer)
         
         # Create initial state
         
@@ -192,11 +226,11 @@ class IntegratorSwitchingEnv(gym.Env):
         
         # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
         if self.precompute_reference:
-            if np.max(self.ref_states[:, 0]) < 600:
-                self.total_time = self.total_time/10
+            if np.max(self.ref_states[:, 0]) < 600 or int(self.ref_states[-1, 0]) == int(self.current_temp):
+                self.total_time = 1e-4
                 self.horizon = int(np.ceil(self.total_time / ΔT_dec))                
-                if self.verbose:
-                    print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
+                #if self.verbose:
+                print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
         
         # Create solver instances
         self._create_solver_instances()
@@ -288,6 +322,7 @@ class IntegratorSwitchingEnv(gym.Env):
         self.current_time = 0.0
         self.times_trajectory = [self.current_time]
         self.states_trajectory.append(self.current_state.copy())
+        self.Z_trajectory = [self.current_Z]
 
         # Reset steady state tracking
         self.ignition_detected = False
@@ -295,6 +330,8 @@ class IntegratorSwitchingEnv(gym.Env):
         self.previous_temperature = self.current_state[0]
         self.reached_steady_state = False
         self.count_since_steady_state = 0
+
+        self.failed_integration_count = 0
 
         self.last_obs = None        
         # Reset reward function for new episode
@@ -316,6 +353,7 @@ class IntegratorSwitchingEnv(gym.Env):
                 'reached_steady_state': self.reached_steady_state,
                 'ignition_detected': self.ignition_detected,
                 'ignition_time': self.ignition_time,
+                'forced_termination': forced_termination,
             })
             return obs, 0.0, terminated, False, info
 
@@ -327,7 +365,7 @@ class IntegratorSwitchingEnv(gym.Env):
             timestep_error = float('inf')
         else:
             # Integrate one decision interval (super_steps * dt)
-            reward, success, cpu_time, timestep_error = self._integrate_super_step(action)
+            reward, success, cpu_time, timestep_error, forced_termination = self._integrate_super_step(action)
 
         # Book-keeping
         self.action_history.append(action)
@@ -343,11 +381,18 @@ class IntegratorSwitchingEnv(gym.Env):
             (self.current_time >= self.total_time) or
             (self.terminated_by_steady_state and self.reached_steady_state) or
             (self.count_since_steady_state >= self.termination_count_threshold) or
-            (self.current_episode + 1 >= self.horizon)
+            (self.current_episode + 1 >= self.horizon) or
+            forced_termination
         )
+
+        if self.count_since_steady_state >= self.termination_count_threshold:
+            print(f"Terminated due to count since steady state: {self.count_since_steady_state}")
 
         if terminated and hasattr(self.reward_function, 'end_episode_update_lambda'):
             self.reward_function.end_episode_update_lambda()
+
+        if terminated and forced_termination:
+            print(f"Terminated due to forced termination at episode {self.current_episode}")
 
         # Build obs/info for the transition
         obs = self._get_observation(self.current_state)
@@ -371,6 +416,7 @@ class IntegratorSwitchingEnv(gym.Env):
                                     else 'ongoing')))
                             )
             ),
+            'forced_termination': forced_termination,
         })
 
         # One env step done
@@ -443,8 +489,10 @@ class IntegratorSwitchingEnv(gym.Env):
                 cpu_times.append(time.time() - start_time)
                 # Update gas object with new state for next iteration
                 self.gas.TPY = self.current_state[0], self.current_pressure, self.current_state[1:]
+                self.current_Z = self.gas.mixture_fraction(self.fuel, self.oxidizer)
                 if self.track_trajectory:
                     self.states_trajectory.append(self.current_state.copy())
+                    self.Z_trajectory.append(self.current_Z)
                 self.current_time += self.dt
                 if self.track_trajectory:
                     self.times_trajectory.append(self.current_time)
@@ -464,25 +512,30 @@ class IntegratorSwitchingEnv(gym.Env):
             
             # Update error tracking
             self.timestep_errors.append(timestep_error)
-            
+            forced_termination = False
             # Calculate reward using new reward function
             reward = self.reward_function.step_reward(cpu_time, timestep_error, action, self.reached_steady_state)
             
-            return reward, True, cpu_time, timestep_error
+            return reward, True, cpu_time, timestep_error, forced_termination
             
         except Exception as e:
             cpu_time = time.time() - start_time
             if self.verbose:
                 print(f"Solver {config['name']} failed: {e}")
-            
+            self.failed_integration_count += 1
             self.current_time = self.current_time + self.dt
             # Handle failed integration
             timestep_error = float('inf')
             self.timestep_errors.append(timestep_error)
+
             
             reward = -5.0
-            
-            return reward, False, cpu_time, timestep_error
+            if self.failed_integration_count >= 10:
+               forced_termination = True
+               print(f"Forced termination due to failed integration count: {self.failed_integration_count}")
+            else:
+                forced_termination = False
+            return reward, False, cpu_time, timestep_error, forced_termination
     
     def _calculate_error(self, state, ref_state):
         """Calculate relative error between states"""
@@ -605,6 +658,7 @@ class IntegratorSwitchingEnv(gym.Env):
                 'ignition_time': self.ignition_time,
                 'reached_steady_state': self.reached_steady_state,
                 'current_time': self.current_time,
+                'failed_integration_count': self.failed_integration_count
             }
             }
     

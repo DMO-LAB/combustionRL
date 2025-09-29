@@ -187,12 +187,16 @@ class ConstrainedReward:
             stiff = np.tanh(abs(dT_dt) / dt_ref)
             r += 0.15 * (stiff if action == 0 else -stiff)
 
+
+        # if violation == 0.0 and action == 1:
+        #     r += 0.5
+
         # Light shaping at steady state: prefer cheaper solver if constraint satisfied
         if reached_steady_state and violation == 0.0:
-            if action == 1:
-                r += 0.5
-            # else:
-            #     r -= 0.5
+             if action == 1:
+                 r += .1
+        if reached_steady_state and violation != 0.0:
+            r -= 0.1
 
         # Clip for PPO stability
         reward = float(np.clip(r, -self.reward_clip, self.reward_clip))

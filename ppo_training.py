@@ -396,8 +396,7 @@ class DetailedLogger:
                 'reached_steady_state': ss_info.get('reached_steady_state', False),
                 'current_time': ss_info.get('current_time', 0),
                 'initial_temp': env_info['current_conditions'].get('temperature', 0),
-                'initial_pressure': env_info['current_conditions'].get('pressure', 0),
-                'phi': env_info['current_conditions'].get('phi', 0)
+                'initial_pressure': env_info['current_conditions'].get('pressure', 0)
             }
             self.combustion_metrics.append(combustion_entry)
         
@@ -509,9 +508,9 @@ class DetailedLogger:
             latest = self.combustion_metrics[-1]
             if latest['ignition_detected']:
                 print(f"Combustion: Ignition @ {latest['ignition_time']:.6f}s, "
-                      f"T₀={latest['initial_temp']:.0f}K, φ={latest['phi']:.2f}")
+                      f"T₀={latest['initial_temp']:.0f}K")
             else:
-                print(f"Combustion: No ignition, T₀={latest['initial_temp']:.0f}K, φ={latest['phi']:.2f}")
+                print(f"Combustion: No ignition, T₀={latest['initial_temp']:.0f}K")
         
         print(f"{'='*80}")
     
@@ -781,7 +780,7 @@ class DetailedLogger:
             fig.suptitle(f'Evaluation Episode {episode_num} - Set {i+1}\n'
                         f'T={result["conditions"]["temperature"]:.0f}K, '
                         f'P={result["conditions"]["pressure"]:.1f}bar, '
-                        f'φ={result["conditions"]["phi"]:.2f}', fontsize=14)
+                        f'φ={result["conditions"]["Z"]:.2f}', fontsize=14)
             
             # Extract data from the first episode of this condition set
             if 'episodes' in result and result['episodes']:
@@ -875,8 +874,8 @@ class DetailedLogger:
                 except Exception as e:
                     print(f"Warning: Failed to upload {filename} to Neptune: {e}")
         
-        # Create summary plot for all evaluation sets
-        self._create_evaluation_summary_plot(episode_num, eval_results)
+        # # Create summary plot for all evaluation sets
+        # self._create_evaluation_summary_plot(episode_num, eval_results)
     
     def _create_evaluation_summary_plot(self, episode_num, eval_results):
         """Create summary plot comparing all evaluation sets"""
@@ -895,7 +894,7 @@ class DetailedLogger:
                 temperatures = episode_data['temperatures']
                 reference_temperatures = episode_data['reference_temperatures']
                 reference_times = episode_data['reference_times']
-                label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['phi']:.2f}"
+                label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['Z']:.2f}"
                 ax1.plot(times, temperatures, color=colors[i], linewidth=2, label=label)
                 ax1.plot(reference_times[:len(times)], reference_temperatures[:len(times)], color='black', linewidth=2, label='Reference', linestyle='--')
         
@@ -911,7 +910,7 @@ class DetailedLogger:
             if 'episodes' in result and result['episodes']:
                 episode_data = result['episodes'][0]  # Use first episode for detailed plotting
                 cpu_times = episode_data['cpu_times']
-                label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['phi']:.2f}"
+                label = f"T={result['conditions']['temperature']:.0f}K, φ={result['conditions']['Z']:.2f}"
                 ax2.plot(np.arange(len(cpu_times)), cpu_times, color=colors[i], linewidth=2, label=label)
         ax2.set_xlabel('Time (s)')
         ax2.set_ylabel('CPU Time (s)')
@@ -997,14 +996,14 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
     
     for cond_idx, conditions in enumerate(eval_conditions):
         print(f"Evaluating condition set {cond_idx + 1}/{len(eval_conditions)}: "
-              f"T={conditions['temperature']:.0f}K, P={conditions['pressure']:.1f}bar, φ={conditions['phi']:.2f}")
+              f"T={conditions['temperature']:.0f}K, P={conditions['pressure']:.1f}bar, Z={conditions['Z']:.2f}")
         
         set_results = []
         
         for ep_idx in range(n_eval_episodes):
      
             # Reset environment
-            obs, info = env.reset(temperature=conditions['temperature'], pressure=conditions['pressure']*ct.one_atm, phi=conditions['phi'], total_time=conditions['total_time'])
+            obs, info = env.reset(temperature=conditions['temperature'], pressure=conditions['pressure']*ct.one_atm, Z=conditions['Z'], total_time=conditions['total_time'])
             print(f"Reference Max Temperature: {np.max(env.ref_states[:, 0])} - horizon: {env.horizon} - total_time: {conditions['total_time']}")
             done = False
             
@@ -1037,10 +1036,11 @@ def evaluate_agent(agent, env, eval_conditions, n_eval_episodes=5, deterministic
                 cpu_time = next_info.get('cpu_time', 0)
                 pbar.set_postfix({
                     'T': f'{temp:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K',
-                    'I': f'{env.current_pressure/ct.one_atm:.1f}bar, φ={env.current_phi:.2f}',
+                    'I': f'{env.current_pressure/ct.one_atm:.1f}bar, Z={env.current_Z:.2f}',
                     'A': action,
                     'C': f'{cpu_time:.3f}s',
                     'R': f'{reward:.1f}',
+                    'Z': f'{env.current_Z:.2f}',
                     'E': f'{env.timestep_errors[-1]:.3f}',
                     'L': f'{(env.current_episode-1)*env.super_steps}/{len(env.ref_states)}'
                 })
@@ -1141,10 +1141,16 @@ def compute_gae(rewards, values, dones, next_value, gamma=0.99, gae_lambda=0.95)
     returns = [adv + val for adv, val in zip(advantages, values)]
     return np.array(returns, dtype=np.float32), np.array(advantages, dtype=np.float32)
 
+def load_policy(agent, model_path):
+    """Load a policy from a file"""
+    model = torch.load(model_path, map_location=agent.device, weights_only=False)
+    agent.network.load_state_dict(model['model_state_dict'])
+    agent.network.to(agent.device)
+    return agent
 
 def train_ppo(env, total_steps=1000000, rollout_length=2048, 
               save_freq=100, plot_freq=100, eval_freq=100, eval_conditions=None, 
-              n_eval_episodes=5, neptune_run: Optional[object] = None, const_pressure=None, **ppo_kwargs):
+              n_eval_episodes=5, neptune_run: Optional[object] = None, const_pressure=None, model_path=None, **ppo_kwargs):
     """Fixed PPO training loop with proper periodic operations"""
     
     # Initialize agent
@@ -1153,7 +1159,8 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
     
     agent = PPOAgent(obs_dim, action_dim, **ppo_kwargs)
 
-    
+    if model_path is not None:
+        agent = load_policy(agent, model_path)
     
     # Initialize logger
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1233,10 +1240,11 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
             ref_temp = env.ref_states[(env.current_episode-1) * env.super_steps, 0]
             pbar.set_postfix({
                 'T': f'{temp:.1f}K | {ref_temp:.1f}K/{env.ref_states[0, 0]:.1f}K', 
-                'I': f'{env.current_pressure/ct.one_atm:.1f}bar | {env.current_phi:.2f}',
+                'I': f'{env.current_pressure/ct.one_atm:.1f}bar | {env.current_Z:.2f}',
                 'A': action, 
                 'R': f'{reward:.1f}', 
                 'C': f'{cpu_time:.3f}',
+                'TT': f'{env.total_time:.3f}',
                 'E': f'{env.timestep_errors[-1]:.3f}',
                 'L': f'{(env.current_episode-1)*env.super_steps}/{len(env.ref_states)}'
             })
@@ -1357,7 +1365,7 @@ def train_ppo(env, total_steps=1000000, rollout_length=2048,
                 logger.create_plots()
             
             # Evaluation
-            if (eval_conditions and update_count % eval_freq == 0) or update_count == 1:
+            if (eval_conditions and update_count % eval_freq == 0):
                 print(f"Running evaluation at update {update_count}...")
                 eval_results = evaluate_agent(agent, env, eval_conditions, n_eval_episodes, deterministic=True)
                 logger.log_evaluation(update_count, eval_results)
@@ -1404,7 +1412,7 @@ if __name__ == "__main__":
                        help='Oxidizer specification')
     
     # Training arguments
-    parser.add_argument('--total-steps', type=int, default=1000000,
+    parser.add_argument('--total-steps', type=int, default=10000000,
                        help='Total training steps')
     parser.add_argument('--rollout-length', type=int, default=2048,
                        help='Rollout length for PPO updates')
@@ -1429,17 +1437,21 @@ if __name__ == "__main__":
                        help='Evaluation frequency (episodes)')
     parser.add_argument('--n-eval-episodes', type=int, default=1,
                        help='Number of evaluation episodes per condition set')
-    parser.add_argument('--eval-temp', nargs=3, type=float, default=[650, 800, 1050],
+    parser.add_argument('--eval-temp', nargs=5, type=float, default=[650, 800, 1050, 500, 1000],
                        help='Evaluation temperatures (K)')
-    parser.add_argument('--eval-pressure', nargs=3, type=float, default=[60.0, 30.0, 10.0],
+    parser.add_argument('--eval-pressure', nargs=5, type=float, default=[60.0, 10.0, 1, 60.0, 40],
                        help='Evaluation pressures (bar)')
-    parser.add_argument('--eval-phi', nargs=3, type=float, default=[1, 1.66, 1.0],
-                       help='Evaluation equivalence ratios')
-    parser.add_argument('--eval-time', nargs=3, type=float, default=[5e-2, 0.007, 2e-2],
+    parser.add_argument('--eval-Z', nargs=5, type=float, default=[0.2, 0.34, 0.3, 0.99, 1e-8],
+                       help='Evaluation mixture fractions')
+    parser.add_argument('--eval-time', nargs=5, type=float, default=[5e-2, 0.007, 3e-2, 4e-2, 1e-2],
                        help='Evaluation total times (s)')
+
+
+    parser.add_argument('--model-path', type=str, default=None,
+                       help='Path to model to load')
     
     # PPO hyperparameters
-    parser.add_argument('--lr', type=float, default=5e-4,
+    parser.add_argument('--lr', type=float, default=1e-4,
                        help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99,
                        help='Discount factor')
@@ -1459,13 +1471,11 @@ if __name__ == "__main__":
                        help='Policy network architecture')
     
     # Environment configuration
-    parser.add_argument('--temp-range', nargs=2, type=float, default=[300, 1100],
+    parser.add_argument('--temp-range', nargs=2, type=float, default=[300, 1300],
                        help='Temperature range for environment')
-    parser.add_argument('--phi-range', nargs=2, type=float, default=[0.5, 2.0],
-                       help='Equivalence ratio range')
-    parser.add_argument('--pressure-range', nargs=2, type=float, default=[10, 60],
+    parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-2, 5e-1],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
@@ -1572,7 +1582,6 @@ if __name__ == "__main__":
         fuel=args.fuel,
         oxidizer=args.oxidizer,
         temp_range=args.temp_range,
-        phi_range=args.phi_range,
         pressure_range=args.pressure_range,
         time_range=args.time_range,
         dt_range=args.dt_range,
@@ -1634,17 +1643,17 @@ if __name__ == "__main__":
     
     # Setup evaluation conditions
     eval_conditions = []
-    for i in range(3):
+    for i in range(5):
         eval_conditions.append({
             'temperature': args.eval_temp[i],
             'pressure': args.eval_pressure[i],
-            'phi': args.eval_phi[i],
+            'Z': args.eval_Z[i],
             'total_time': args.eval_time[i]
         })
     
     print(f"\nEvaluation conditions:")
     for i, cond in enumerate(eval_conditions):
-        print(f"  Set {i+1}: T={cond['temperature']:.0f}K, P={cond['pressure']:.1f}bar, φ={cond['phi']:.2f}, Total time={cond['total_time']:.2e}s")
+        print(f"  Set {i+1}: T={cond['temperature']:.0f}K, P={cond['pressure']:.1f}bar, Z={cond['Z']:.2f}, Total time={cond['total_time']:.2e}s")
     
     # Start training
     print(f"\nStarting PPO training with {args.total_steps} steps...")
@@ -1661,6 +1670,7 @@ if __name__ == "__main__":
             n_eval_episodes=args.n_eval_episodes,
             neptune_run=neptune_run,
             const_pressure=None,
+            model_path=args.model_path,
             **ppo_kwargs
         )
         
