@@ -37,6 +37,7 @@ def set_integrator_rl(solver, rl_selector, decision_step, super_steps=100, total
         print(f"RL batch selection failed: {e}")
         integ_types = ['cvode'] * nPoints
     
+    solver.set_integrator_types(integ_types)
     return integ_types
 
 def set_integrator_heuristic(solver, constant_int=None):
@@ -125,7 +126,7 @@ def run_simulation_with_method(integrator_method='rl', model_path=None, super_st
                         slopeWidth=slope_width, xLeft=x_left, pressure=pressure,
                         xRight=x_right, nPoints=npoints, fuel=fuel, oxidizer=oxidizer),
         StrainParameters(final=strain_rate, initial=strain_rate),
-        Times(globalTimestep=dt, profileStepInterval=10000, regridStepInterval=100, regridTimeInterval=100),  # dt = 1e-6
+        Times(globalTimestep=dt, profileStepInterval=10000, regridStepInterval=int(1e6), regridTimeInterval=int(1e6)),  # dt = 1e-6
         TerminationCondition(abstol=0.0, dTdtTol=0, steadyPeriod=1.0,
                            tEnd=total_time, tolerance=0.0),
         QssTolerances(abstol=1e-8, dtmin=1e-16, dtmax=1e-6,
@@ -622,24 +623,26 @@ if __name__ == "__main__":
     # Example usage
     
     # Path to your trained RL model
-    model_path = "model_update_60.pt" 
+    model_path = "new_data/model_update_100.pt" 
     use_time_left = False
     super_steps = 1
-    t_fuel = 363
-    t_oxidizer = 900
-    total_time = 0.05
-    time_to_plot = np.linspace(0, total_time, 5)
-    pressure = 101325 * 60
-    center_width = 0.001
-    slope_width = 0.0005
-    x_left = -0.002
-    x_right = 0.002
-    npoints = 100
-    strain_rate = 1000
+    center_width = 0
+    slope_width = 0
+    # More realistic parameters for thicker flame
+    strain_rate = 2500          # Reduced from 100
+    pressure = 101325 * 10     # Reduced from 60 atm to 5 atm  
+    x_left = -0.008          # Expanded from -0.002
+    x_right = 0.008          # Expanded from 0.002
+    npoints = 100            # Increased from 300
+    total_time = 0.05        # Increased from 0.02
+    t_fuel = 300             # Lower fuel temperature
+    t_oxidizer = 1200        # Higher oxidizer temperature
+    npoints = 300
     equilibrate_counterflow = False
     dt = 1e-5
     fuel_choice = 0
     MODE = 'compare' # rl or compare
+    time_to_plot = np.linspace(0, total_time, 5)
     
     if MODE != 'compare':
         # Run individual simulation with RL

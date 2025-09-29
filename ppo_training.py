@@ -1412,13 +1412,13 @@ if __name__ == "__main__":
                        help='Oxidizer specification')
     
     # Training arguments
-    parser.add_argument('--total-steps', type=int, default=10000000,
+    parser.add_argument('--total-steps', type=int, default=1000000,
                        help='Total training steps')
-    parser.add_argument('--rollout-length', type=int, default=2048,
+    parser.add_argument('--rollout-length', type=int, default=1024,
                        help='Rollout length for PPO updates')
-    parser.add_argument('--save-freq', type=int, default=10,
+    parser.add_argument('--save-freq', type=int, default=20,
                        help='Model save frequency')
-    parser.add_argument('--plot-freq', type=int, default=10,
+    parser.add_argument('--plot-freq', type=int, default=100,
                        help='Plot generation frequency')
     
     
@@ -1433,17 +1433,17 @@ if __name__ == "__main__":
                        help='Optional display name for the Neptune run')
     
     # Evaluation arguments
-    parser.add_argument('--eval-freq', type=int, default=10,
+    parser.add_argument('--eval-freq', type=int, default=20,
                        help='Evaluation frequency (episodes)')
     parser.add_argument('--n-eval-episodes', type=int, default=1,
                        help='Number of evaluation episodes per condition set')
-    parser.add_argument('--eval-temp', nargs=5, type=float, default=[650, 800, 1050, 500, 1000],
+    parser.add_argument('--eval-temp', nargs=4, type=float, default=[650, 800, 500, 1000],
                        help='Evaluation temperatures (K)')
-    parser.add_argument('--eval-pressure', nargs=5, type=float, default=[60.0, 10.0, 1, 60.0, 40],
+    parser.add_argument('--eval-pressure', nargs=4, type=float, default=[60.0, 10.0,60.0, 40],
                        help='Evaluation pressures (bar)')
-    parser.add_argument('--eval-Z', nargs=5, type=float, default=[0.2, 0.34, 0.3, 0.99, 1e-8],
+    parser.add_argument('--eval-Z', nargs=4, type=float, default=[0.2, 0.34, 0.99, 1e-8],
                        help='Evaluation mixture fractions')
-    parser.add_argument('--eval-time', nargs=5, type=float, default=[5e-2, 0.007, 3e-2, 4e-2, 1e-2],
+    parser.add_argument('--eval-time', nargs=4, type=float, default=[5e-2, 0.004, 4e-2, 1e-2],
                        help='Evaluation total times (s)')
 
 
@@ -1451,7 +1451,7 @@ if __name__ == "__main__":
                        help='Path to model to load')
     
     # PPO hyperparameters
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=5e-4,
                        help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99,
                        help='Discount factor')
@@ -1467,7 +1467,7 @@ if __name__ == "__main__":
                        help='Maximum gradient norm')
     
     # parse the policy network architecture
-    parser.add_argument('--policy-network-arch', type=str, default='[128, 128]',
+    parser.add_argument('--policy-network-arch', type=str, default='[256, 128, 64]',
                        help='Policy network architecture')
     
     # Environment configuration
@@ -1475,17 +1475,17 @@ if __name__ == "__main__":
                        help='Temperature range for environment')
     parser.add_argument('--pressure-range', nargs=2, type=float, default=[1, 60],
                        help='Pressure range (bar)')
-    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-2, 5e-1],
+    parser.add_argument('--time-range', nargs=2, type=float, default=[1e-3, 1e-1],
                        help='Time range for simulations')
     parser.add_argument('--dt-range', nargs=2, type=float, default=[1e-6, 1e-6],
                        help='Timestep range')
-    parser.add_argument('--etol', type=float, default=1e-4,
+    parser.add_argument('--etol', type=float, default=5e-4,
                        help='Error tolerance')
-    parser.add_argument('--super-steps', type=int, default=10,
+    parser.add_argument('--super-steps', type=int, default=100,
                        help='Number of super steps per episode')
     
     # Reward function parameters
-    parser.add_argument('--epsilon', type=float, default=1e-4,
+    parser.add_argument('--epsilon', type=float, default=5e-4,
                        help='Error threshold for reward function')
     parser.add_argument('--lambda-init', type=float, default=1.0,
                        help='Lambda initial value')
@@ -1493,7 +1493,7 @@ if __name__ == "__main__":
                        help='Lambda learning rate')
     parser.add_argument('--target-violation', type=float, default=0.0,
                        help='Target violation')
-    parser.add_argument('--cpu-log-delta', type=float, default=5e-4,
+    parser.add_argument('--cpu-log-delta', type=float, default=1e-1,
                        help='CPU log delta')
     parser.add_argument('--reward-clip', type=float, default=10.0,
                        help='Reward clip')
@@ -1564,7 +1564,7 @@ if __name__ == "__main__":
     # Reward function configuration
     reward_cfg = dict(epsilon=args.epsilon, lambda_init=1.0, lambda_lr=0.05,
                       target_violation=0.0, cpu_log_delta=1e-3, reward_clip=10.0,
-                      cpu_time_baseline=0.001, soft_margin_decades=0.15, switch_penalty=0.02,
+                      cpu_time_baseline=0.1, soft_margin_decades=0.15, switch_penalty=0.02,
                       ema_alpha=0.3, lambda_max=1e4)
     reward_function = ConstrainedReward(**reward_cfg)
     
@@ -1634,7 +1634,7 @@ if __name__ == "__main__":
     for i in range(3):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
-        print(f"Step {i+1}: action={action}, reward={reward:.4f}, terminated={terminated}")
+        print(f"Step {i+1}: action={action}, reward={reward:.4f}, terminated={terminated} - cpu time: {info['cpu_time']:.4f}, timestep error: {info['timestep_error']:.4f}")
         if terminated or truncated:
             obs, info = env.reset()
             break
@@ -1643,7 +1643,7 @@ if __name__ == "__main__":
     
     # Setup evaluation conditions
     eval_conditions = []
-    for i in range(5):
+    for i in range(4):
         eval_conditions.append({
             'temperature': args.eval_temp[i],
             'pressure': args.eval_pressure[i],

@@ -193,10 +193,19 @@ class ConstrainedReward:
 
         # Light shaping at steady state: prefer cheaper solver if constraint satisfied
         if reached_steady_state and violation == 0.0:
-             if action == 1:
-                 r += .1
+            #  if action == 1:
+            #      r += 0.1
+            print(f"Reached steady state and violation is 0.0 and action is 1 - reward: {r} - error: {err} - cpu term: {cpu_term}")
         if reached_steady_state and violation != 0.0:
-            r -= 0.1
+            r -= 0.5
+            
+        # If there is a violation, ignore CPU time and use an error-only penalty.
+        # Smooth magnitude via decades above epsilon: r = -log10(err/epsilon).
+        # This preserves a gradient near the boundary while removing speed incentives.
+        if violation > 0.0:
+            err_ratio = (max(err, 1e-300)) / (self.epsilon + 1e-300)
+            err_decades = max(np.log10(err_ratio), 0.0)
+            r = -err_decades
 
         # Clip for PPO stability
         reward = float(np.clip(r, -self.reward_clip, self.reward_clip))

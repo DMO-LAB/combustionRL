@@ -226,8 +226,8 @@ class IntegratorSwitchingEnv(gym.Env):
         
         # if max temperature is less than 1000K, adjust end time to 1/10 of the original end time
         if self.precompute_reference:
-            if np.max(self.ref_states[:, 0]) < 600 or int(self.ref_states[-1, 0]) == int(self.current_temp):
-                self.total_time = 1e-4
+            if np.max(self.ref_states[:, 0]) < 1000 or int(self.ref_states[-1, 0]) == int(self.current_temp):
+                self.total_time = 1e-3
                 self.horizon = int(np.ceil(self.total_time / ΔT_dec))                
                 #if self.verbose:
                 print(f"Adjusted total time to {self.total_time} because max temperature is less than 1000K")
